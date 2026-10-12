@@ -1,0 +1,230 @@
+{
+ "actions": [],
+ "allow_rename": 0,
+ "creation": "2026-10-09 10:00:00.000000",
+ "doctype": "DocType",
+ "editable_grid": 1,
+ "engine": "InnoDB",
+ "field_order": [
+  "status_section",
+  "enabled",
+  "dry_run",
+  "column_break_status",
+  "status_html",
+  "bot_section",
+  "bot_unique_name",
+  "api_domain",
+  "column_break_bot",
+  "zapikey",
+  "target_section",
+  "target_type",
+  "channel_unique_name",
+  "column_break_target",
+  "test_redirect",
+  "identity_section",
+  "identity_field",
+  "column_break_identity",
+  "fallback_recipient",
+  "leave_section",
+  "notify_leave_state_change",
+  "column_break_leave",
+  "leave_state_recipient_employee",
+  "delivery_section",
+  "timeout",
+  "max_attempts",
+  "column_break_delivery",
+  "log_successful_sends"
+ ],
+ "fields": [
+  {
+   "fieldname": "status_section",
+   "fieldtype": "Section Break",
+   "label": "Status"
+  },
+  {
+   "default": "0",
+   "description": "Master switch. When off, no Cliq message is sent or logged.",
+   "fieldname": "enabled",
+   "fieldtype": "Check",
+   "label": "Enabled"
+  },
+  {
+   "default": "1",
+   "description": "Render and log every message but never call Zoho. Keep this ON until the bot token is live and outbound access to the API domain is open.",
+   "fieldname": "dry_run",
+   "fieldtype": "Check",
+   "label": "Dry Run (do not actually send)"
+  },
+  {
+   "fieldname": "column_break_status",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "status_html",
+   "fieldtype": "HTML",
+   "label": "Status"
+  },
+  {
+   "description": "Supplied by the Zoho Cliq administrator. The bot must be configured as 'Bot works for: Organization'.",
+   "fieldname": "bot_section",
+   "fieldtype": "Section Break",
+   "label": "Bot"
+  },
+  {
+   "description": "The bot's unique name, not its display name.",
+   "fieldname": "bot_unique_name",
+   "fieldtype": "Data",
+   "label": "Bot Unique Name"
+  },
+  {
+   "default": "cliq.zoho.in",
+   "description": "Data centre host, without https:// — for example cliq.zoho.in or cliq.zoho.com.",
+   "fieldname": "api_domain",
+   "fieldtype": "Data",
+   "label": "API Domain"
+  },
+  {
+   "fieldname": "column_break_bot",
+   "fieldtype": "Column Break"
+  },
+  {
+   "description": "Webhook token. Generate it from a service account, never a personal user, so alerts survive staff changes.",
+   "fieldname": "zapikey",
+   "fieldtype": "Password",
+   "label": "Zapikey"
+  },
+  {
+   "fieldname": "identity_section",
+   "fieldtype": "Section Break",
+   "label": "Identity Mapping"
+  },
+  {
+   "default": "user_id",
+   "description": "Which Employee field holds the address the person logs into Cliq with. Recipients are resolved from the document, then mapped through this field.",
+   "fieldname": "identity_field",
+   "fieldtype": "Select",
+   "label": "Cliq Identity Field",
+   "options": "user_id\ncompany_email"
+  },
+  {
+   "fieldname": "column_break_identity",
+   "fieldtype": "Column Break"
+  },
+  {
+   "description": "Used when a document resolves to no recipient at all. Leave blank to skip such documents instead.",
+   "fieldname": "fallback_recipient",
+   "fieldtype": "Link",
+   "label": "Fallback Recipient",
+   "options": "User"
+  },
+  {
+   "fieldname": "delivery_section",
+   "fieldtype": "Section Break",
+   "label": "Delivery"
+  },
+  {
+   "default": "10",
+   "fieldname": "timeout",
+   "fieldtype": "Int",
+   "label": "Request Timeout (seconds)"
+  },
+  {
+   "default": "3",
+   "description": "Total tries per message before it is marked Failed. Retries apply to timeouts and 5xx responses only.",
+   "fieldname": "max_attempts",
+   "fieldtype": "Int",
+   "label": "Max Attempts"
+  },
+  {
+   "fieldname": "column_break_delivery",
+   "fieldtype": "Column Break"
+  },
+  {
+   "default": "1",
+   "description": "Write a Cliq Message Log row for successful sends as well as failures.",
+   "fieldname": "log_successful_sends",
+   "fieldtype": "Check",
+   "label": "Log Successful Sends"
+  },
+  {
+   "fieldname": "target_section",
+   "fieldtype": "Section Break",
+   "label": "Delivery Target"
+  },
+  {
+   "default": "Direct Message",
+   "description": "Direct Message resolves a recipient per document. Channel posts every message into one Cliq channel instead, which reaches everyone in it without each person subscribing to the bot.",
+   "fieldname": "target_type",
+   "fieldtype": "Select",
+   "label": "Send To",
+   "options": "Direct Message\nChannel"
+  },
+  {
+   "depends_on": "eval:doc.target_type=='Channel'",
+   "description": "The channel's unique name, not its display name. Find it in the channel's settings.",
+   "fieldname": "channel_unique_name",
+   "fieldtype": "Data",
+   "label": "Channel Unique Name"
+  },
+  {
+   "fieldname": "column_break_target",
+   "fieldtype": "Column Break"
+  },
+  {
+   "depends_on": "eval:doc.target_type=='Direct Message'",
+   "description": "While set, every direct message goes to this one address no matter who it resolved to. The log keeps the intended recipient. Needed when the bot is Personal, and a useful safety net on staging. Leave blank in production.",
+   "fieldname": "test_redirect",
+   "fieldtype": "Data",
+   "label": "Test Redirect (send everything here)"
+  },
+  {
+   "description": "Direct-messages one fixed person every time a Leave Application changes workflow state. Independent of the Notification rules.",
+   "fieldname": "leave_section",
+   "fieldtype": "Section Break",
+   "label": "Leave Application State Alerts"
+  },
+  {
+   "default": "0",
+   "description": "Send on every workflow-state transition. A save that does not change the state sends nothing.",
+   "fieldname": "notify_leave_state_change",
+   "fieldtype": "Check",
+   "label": "Notify on Leave Workflow State Change"
+  },
+  {
+   "fieldname": "column_break_leave",
+   "fieldtype": "Column Break"
+  },
+  {
+   "depends_on": "notify_leave_state_change",
+   "description": "Who to notify. The address is read from this Employee: user_id first, then prefered_email, then company_email.",
+   "fieldname": "leave_state_recipient_employee",
+   "fieldtype": "Link",
+   "label": "Recipient Employee",
+   "options": "Employee"
+  }
+ ],
+ "index_web_pages_for_search": 1,
+ "issingle": 1,
+ "links": [],
+ "modified": "2026-10-09 10:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "Zoho Cliq Integration",
+ "name": "Cliq Settings",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "print": 1,
+   "read": 1,
+   "role": "System Manager",
+   "share": 1,
+   "write": 1
+  }
+ ],
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": [],
+ "track_changes": 1
+}
