@@ -78,7 +78,7 @@
   },
   {
    "default": "cliq.zoho.in",
-   "description": "Data centre host, without https:// — for example cliq.zoho.in or cliq.zoho.com.",
+   "description": "Data centre host, without https:// \u2014 for example cliq.zoho.in or cliq.zoho.com.",
    "fieldname": "api_domain",
    "fieldtype": "Data",
    "label": "API Domain"
@@ -153,11 +153,11 @@
   },
   {
    "default": "Direct Message",
-   "description": "Direct Message resolves a recipient per document. Channel posts every message into one Cliq channel instead, which reaches everyone in it without each person subscribing to the bot.",
+   "description": "Direct Message sends to each resolved recipient via the bot. Channel posts once into the channel below. Both does each, for the same event.",
    "fieldname": "target_type",
    "fieldtype": "Select",
    "label": "Send To",
-   "options": "Direct Message\nChannel"
+   "options": "Direct Message\nChannel\nBoth"
   },
   {
    "depends_on": "eval:doc.target_type=='Channel'",

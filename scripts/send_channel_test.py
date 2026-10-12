@@ -58,7 +58,7 @@ frappe.clear_cache()
 print("sending: domain=%s channel=%s dry_run=%s" % (s.api_domain, CHANNEL, s.dry_run))
 print("url    : https://%s/api/v2/channelsbyname/%s/message" % (s.api_domain, CHANNEL))
 
-log_name = queue_message(
+log_names = queue_message(
     recipient_user=None,
     subject="ERPNext integration test",
     message="Hello from ERPNext. This is a connectivity test for the Zoho Cliq integration.",
@@ -67,6 +67,7 @@ log_name = queue_message(
     trigger_state="channel-test",
 )
 
+log_name = log_names[0] if log_names else None
 if not log_name:
     print("RESULT : nothing queued -- settings disabled, or this exact message was already sent")
 else:

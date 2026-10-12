@@ -1,15 +1,6 @@
 # Copyright (c) 2026, MicroCRISPR and contributors
 # For license information, please see license.txt
 
-"""Install-time wiring.
-
-The only schema change this app makes to a core doctype is adding `Cliq` to
-Notification's channel options. That is done with a Property Setter rather than
-a fixture so it survives `bench migrate` and never fights a Frappe upgrade that
-adds a channel of its own: the base options are read back from the DocType at
-run time and Cliq is appended to whatever is there.
-"""
-
 import frappe
 from frappe.custom.doctype.property_setter.property_setter import make_property_setter
 
@@ -26,7 +17,6 @@ def after_migrate():
 
 
 def add_cliq_channel():
-	"""Append Cliq to Notification.channel, preserving the shipped options."""
 	meta = frappe.get_meta("Notification")
 	field = meta.get_field("channel")
 	if not field:
@@ -34,8 +24,6 @@ def add_cliq_channel():
 
 	options = [o for o in (field.options or "").split("\n") if o.strip()]
 
-	# Read the shipped options, not the current ones: if a previous run already
-	# appended Cliq, the meta would hand it back and we would keep it anyway.
 	if CLIQ not in options:
 		options.append(CLIQ)
 
@@ -52,7 +40,6 @@ def add_cliq_channel():
 
 
 def seed_settings():
-	"""Create the Single with safe defaults: off, and in dry run."""
 	settings = frappe.get_single("Cliq Settings")
 	if settings.get("api_domain"):
 		return

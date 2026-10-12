@@ -1,14 +1,6 @@
 # Copyright (c) 2026, MicroCRISPR and contributors
 # For license information, please see license.txt
 
-"""One row of Cliq Notification Settings.doctypes_list.
-
-Frappe does not run `validate` on child rows -- only the parent document's
-validate is called -- so the parent invokes `validate_row` once per row. The
-checks still live here, with the doctype they belong to, rather than being
-hoisted into the parent controller or a shared utils module.
-"""
-
 import frappe
 from frappe import _
 from frappe.model.document import Document
@@ -16,7 +8,6 @@ from frappe.model.document import Document
 
 class CliqNotificationDoctype(Document):
 	def validate_row(self, seen: set):
-		"""`seen` carries document_types already checked in this save."""
 		self.validate_not_duplicate(seen)
 		self.warn_if_no_active_workflow()
 
@@ -36,11 +27,6 @@ class CliqNotificationDoctype(Document):
 		seen.add(document_type)
 
 	def warn_if_no_active_workflow(self):
-		"""Messages follow the workflow, so a doctype without one sends nothing.
-
-		A warning rather than an error: a workflow may legitimately be added
-		after the row, and refusing the save would be the wrong way round.
-		"""
 		if not self.enabled or not self.document_type:
 			return
 

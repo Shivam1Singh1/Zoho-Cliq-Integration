@@ -9,6 +9,7 @@
  "field_order": [
   "status",
   "recipient_cliq",
+  "delivery_mode",
   "column_break_head",
   "notification",
   "reference_doctype",
@@ -43,6 +44,15 @@
    "fieldtype": "Data",
    "in_list_view": 1,
    "label": "Cliq Target",
+   "read_only": 1
+  },
+  {
+   "fieldname": "delivery_mode",
+   "fieldtype": "Select",
+   "label": "Delivery Mode",
+   "options": "\nDirect Message\nChannel",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
    "read_only": 1
   },
   {
