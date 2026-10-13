@@ -23,12 +23,6 @@
   "test_redirect",
   "identity_section",
   "identity_field",
-  "column_break_identity",
-  "fallback_recipient",
-  "leave_section",
-  "notify_leave_state_change",
-  "column_break_leave",
-  "leave_state_recipient_employee",
   "delivery_section",
   "timeout",
   "max_attempts",
@@ -78,7 +72,7 @@
   },
   {
    "default": "cliq.zoho.in",
-   "description": "Data centre host, without https:// \u2014 for example cliq.zoho.in or cliq.zoho.com.",
+   "description": "Data centre host, without https:// — for example cliq.zoho.in or cliq.zoho.com.",
    "fieldname": "api_domain",
    "fieldtype": "Data",
    "label": "API Domain"
@@ -105,17 +99,6 @@
    "fieldtype": "Select",
    "label": "Cliq Identity Field",
    "options": "user_id\ncompany_email"
-  },
-  {
-   "fieldname": "column_break_identity",
-   "fieldtype": "Column Break"
-  },
-  {
-   "description": "Used when a document resolves to no recipient at all. Leave blank to skip such documents instead.",
-   "fieldname": "fallback_recipient",
-   "fieldtype": "Link",
-   "label": "Fallback Recipient",
-   "options": "User"
   },
   {
    "fieldname": "delivery_section",
@@ -176,31 +159,6 @@
    "fieldname": "test_redirect",
    "fieldtype": "Data",
    "label": "Test Redirect (send everything here)"
-  },
-  {
-   "description": "Direct-messages one fixed person every time a Leave Application changes workflow state. Independent of the Notification rules.",
-   "fieldname": "leave_section",
-   "fieldtype": "Section Break",
-   "label": "Leave Application State Alerts"
-  },
-  {
-   "default": "0",
-   "description": "Send on every workflow-state transition. A save that does not change the state sends nothing.",
-   "fieldname": "notify_leave_state_change",
-   "fieldtype": "Check",
-   "label": "Notify on Leave Workflow State Change"
-  },
-  {
-   "fieldname": "column_break_leave",
-   "fieldtype": "Column Break"
-  },
-  {
-   "depends_on": "notify_leave_state_change",
-   "description": "Who to notify. The address is read from this Employee: user_id first, then prefered_email, then company_email.",
-   "fieldname": "leave_state_recipient_employee",
-   "fieldtype": "Link",
-   "label": "Recipient Employee",
-   "options": "Employee"
   }
  ],
  "index_web_pages_for_search": 1,

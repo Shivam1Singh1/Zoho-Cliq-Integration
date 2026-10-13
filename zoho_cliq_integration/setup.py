@@ -2,41 +2,56 @@
 # For license information, please see license.txt
 
 import frappe
-from frappe.custom.doctype.property_setter.property_setter import make_property_setter
 
 CLIQ = "Cliq"
 
 
 def after_install():
-	add_cliq_channel()
 	seed_settings()
 
 
 def after_migrate():
-	add_cliq_channel()
+	remove_cliq_channel()
 
 
-def add_cliq_channel():
-	meta = frappe.get_meta("Notification")
-	field = meta.get_field("channel")
-	if not field:
-		return
+def remove_cliq_channel():
+	rules = frappe.get_all("Notification", filters={"channel": CLIQ}, pluck="name")
 
-	options = [o for o in (field.options or "").split("\n") if o.strip()]
+	for name in rules:
+		frappe.db.set_value("Notification", name, "enabled", 0, update_modified=False)
 
-	if CLIQ not in options:
-		options.append(CLIQ)
+	for row in frappe.get_all(
+		"Property Setter",
+		filters={
+			"doc_type": "Notification",
+			"field_name": "channel",
+			"property": "options",
+		},
+		fields=["name", "value"],
+	):
+		if CLIQ in (row.value or ""):
+			frappe.delete_doc(
+				"Property Setter", row.name, ignore_permissions=True, force=True
+			)
 
-	make_property_setter(
-		"Notification",
-		"channel",
-		"options",
-		"\n".join(options),
-		"Text",
-		validate_fields_for_doctype=False,
-		is_system_generated=True,
-	)
 	frappe.clear_cache(doctype="Notification")
+
+	if rules:
+		frappe.log_error(
+			title="Cliq: Notification channel withdrawn",
+			message=(
+				"This app no longer delivers over Frappe's Notification doctype. "
+				"'Cliq' has been removed from the channel options, and these rules "
+				"were disabled because their channel no longer exists:\n\n"
+				+ "\n".join(f"  - {name}" for name in rules)
+				+ "\n\nThey are disabled, not deleted, so nothing is lost. To get "
+				"these alerts back, tick the doctype in Cliq Notification Settings "
+				"instead: recipients then come from the doctype's own Workflow "
+				"rather than from a rule's recipient list.\n\n"
+				"Leaving them enabled was not an option -- the channel option is "
+				"gone, so saving such a rule now fails validation."
+			),
+		)
 
 
 def seed_settings():

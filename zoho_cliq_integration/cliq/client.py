@@ -74,7 +74,6 @@ def queue_message(
 	recipient_user: str | None,
 	subject: str,
 	message: str,
-	notification: str | None = None,
 	reference_doctype: str | None = None,
 	reference_name: str | None = None,
 	trigger_state: str | None = None,
@@ -90,9 +89,7 @@ def queue_message(
 		if not target:
 			continue
 
-		if _already_raised(
-			notification, reference_doctype, reference_name, trigger_state, target
-		):
+		if _already_raised(reference_doctype, reference_name, trigger_state, target):
 			continue
 
 		log = frappe.get_doc(
@@ -100,7 +97,6 @@ def queue_message(
 				"doctype": "Cliq Message Log",
 				"status": "Dry Run" if settings.dry_run else "Queued",
 				"delivery_mode": mode,
-				"notification": notification,
 				"reference_doctype": reference_doctype,
 				"reference_name": reference_name,
 				"trigger_state": trigger_state,
@@ -128,7 +124,7 @@ def queue_message(
 	return log_names
 
 
-def _already_raised(notification, reference_doctype, reference_name, trigger_state, target):
+def _already_raised(reference_doctype, reference_name, trigger_state, target):
 	if not (reference_doctype and reference_name):
 		return False
 
@@ -136,7 +132,6 @@ def _already_raised(notification, reference_doctype, reference_name, trigger_sta
 		frappe.db.exists(
 			"Cliq Message Log",
 			{
-				"notification": _unset_or(notification),
 				"reference_doctype": reference_doctype,
 				"reference_name": reference_name,
 				"trigger_state": _unset_or(trigger_state),

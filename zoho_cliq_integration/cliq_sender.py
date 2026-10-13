@@ -161,7 +161,7 @@ def record(
 				"delivery_mode": mode,
 				"reference_doctype": reference_doctype,
 				"reference_name": reference_name,
-				"trigger_state": f"{old_state} -> {new_state}",
+				"trigger_state": state_label(old_state, new_state),
 				"recipient_user": fit(intended),
 				"recipient_cliq": fit(targets),
 				"subject": subject,
@@ -187,6 +187,13 @@ def record(
 		)
 
 
+def state_label(old_state: str, new_state: str) -> str:
+	# An empty old state means a creation, not a transition out of nowhere.
+	# "(new) -> Pending" says that; " -> Pending" reads like a lost value, and
+	# it is also the duplicate guard's key, so it has to be stable.
+	return f"{old_state} -> {new_state}" if old_state else f"(new) -> {new_state}"
+
+
 def fit(addresses: list, limit: int = 140) -> str:
 	joined = ", ".join(addresses)
 	if len(joined) <= limit:
@@ -209,12 +216,16 @@ def build_message(
 	applicant: str | None = None,
 ) -> str:
 	lines = [
-		f"{reference_doctype}: {old_state or '(none)'} -> {new_state}",
+		f"{reference_doctype} created: {new_state}"
+		if not old_state
+		else f"{reference_doctype}: {old_state} -> {new_state}",
 		"",
 	]
 	if applicant:
 		lines.append(f"Applicant: {applicant}")
-	lines.append(f"Actioned by: {get_full_name(actor)}")
+	lines.append(
+		f"{'Raised by' if not old_state else 'Actioned by'}: {get_full_name(actor)}"
+	)
 
 	try:
 		url = get_url_to_form(reference_doctype, reference_name)

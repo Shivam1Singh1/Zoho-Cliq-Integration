@@ -1,10 +1,9 @@
 """App manifest.
 
-Everything this app adds to a site is declared at the bottom of this file: the
-Notification class override that gives Cliq its own delivery channel, and the
-install hooks that register "Cliq" as a channel option on the Notification
-doctype. The commented blocks in between are Frappe's scaffolding, left as
-generated.
+Everything this app adds to a site is declared at the bottom of this file: one
+wildcard document hook that watches every save for a workflow-state change on a
+doctype listed in Cliq Notification Settings. The commented blocks in between
+are Frappe's scaffolding, left as generated.
 """
 
 app_name = "zoho_cliq_integration"
@@ -261,36 +260,20 @@ app_license = "mit"
 # Zoho Cliq Integration
 # ---------------------
 
-# Cliq is added as a Notification channel rather than as a parallel rule
-# engine, so conditions, recipients, templating and the Value Change trigger
-# all come from Frappe's own Notification doctype.
-override_doctype_class = {
-	"Notification": "zoho_cliq_integration.overrides.notification.CliqNotification"
-}
-
-# A Leave Application's workflow state is announced to one fixed person, who
-# is named in Cliq Settings. That recipient has nothing to do with the document
-# -- not the applicant, not an approver -- so a Notification rule cannot resolve
-# it and this is a document hook instead.
-
-# `on_update` alone is not enough. This workflow approves across the submit
-# boundary: Pending -> Approved by Leave Approver submits the document (which
-# does run on_update), but Approved by Leave Approver -> Approved By HR Head is
-# a change to an allow-on-submit field on an already-submitted document, and
-# that only ever reaches on_update_after_submit. The same guarded handler takes
-# all three, and the has_value_changed check makes the extra paths free.
-_LEAVE_STATE_HOOK = "zoho_cliq_integration.events.leave_application.on_update"
-
-# The table-driven side: Cliq Notification Settings lists which doctypes send a
-# message on a workflow state change, and recipients come from each doctype's
-# own Workflow. Hence the wildcard -- the configured list is data, not code, so
-# the hook cannot name the doctypes up front. The handler's first act is a
-# cached membership test, so an unconfigured doctype costs one cache read.
+# Which doctypes send a message is data, not code: Cliq Notification Settings
+# lists them, and recipients come from each doctype's own Workflow. Hence the
+# wildcard -- the hook cannot name the doctypes up front. The handler's first
+# act is a cached membership test, so a doctype nobody configured costs one
+# cache read and nothing else.
+#
+# No doctype is named anywhere in this app. One rule serves all of them, and
+# the only way to add one is to tick it in Cliq Notification Settings.
 #
 # The three events are not interchangeable. `on_update` misses a transition
-# between two submitted states, which is how an allow-on-submit workflow field
-# changes (Approved by Leave Approver -> Approved By HR Head reaches only
-# on_update_after_submit), and cancellation reaches only on_cancel.
+# between two submitted states -- which is how an allow-on-submit workflow
+# field changes, and it reaches only on_update_after_submit -- and cancellation
+# reaches only on_cancel. The same guarded handler takes all three, and the
+# has_value_changed check makes the extra paths free.
 _WORKFLOW_HOOK = "zoho_cliq_integration.workflow_notify.on_update"
 
 doc_events = {
@@ -298,11 +281,6 @@ doc_events = {
 		"on_update": _WORKFLOW_HOOK,
 		"on_update_after_submit": _WORKFLOW_HOOK,
 		"on_cancel": _WORKFLOW_HOOK,
-	},
-	"Leave Application": {
-		"on_update": _LEAVE_STATE_HOOK,
-		"on_update_after_submit": _LEAVE_STATE_HOOK,
-		"on_cancel": _LEAVE_STATE_HOOK,
 	},
 }
 

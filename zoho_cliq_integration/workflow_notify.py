@@ -24,13 +24,16 @@ def on_update(doc, method=None):
 		if not doc.has_value_changed(STATE_FIELD):
 			return
 
-		before = doc.get_doc_before_save()
-		if not before:
+		new_state = (doc.get(STATE_FIELD) or "").strip()
+		if not new_state:
 			return
 
-		old_state = (before.get(STATE_FIELD) or "").strip()
-		new_state = (doc.get(STATE_FIELD) or "").strip()
-		if not new_state or old_state == new_state:
+		# A creation has no `before`, and that is the whole difference between
+		# the two paths below. It is not a transition: there is no previous
+		# state, and nobody handed the document on.
+		before = doc.get_doc_before_save()
+		old_state = (before.get(STATE_FIELD) or "").strip() if before else ""
+		if before and old_state == new_state:
 			return
 
 		workflow = get_active_workflow(doc.doctype)
@@ -38,7 +41,12 @@ def on_update(doc, method=None):
 			return
 
 		actor = frappe.session.user
-		recipients = collect_recipients(doc, before, workflow, old_state, new_state, actor)
+		if before:
+			recipients = collect_recipients(
+				doc, before, workflow, old_state, new_state, actor
+			)
+		else:
+			recipients = get_creation_recipients(doc, workflow, new_state, actor)
 		if not recipients:
 			return
 
@@ -75,6 +83,30 @@ def collect_recipients(doc, before, workflow, old_state, new_state, actor) -> li
 	if reply_to:
 		users.append(reply_to)
 
+	return to_emails(users, actor)
+
+
+def get_creation_recipients(doc, workflow, new_state, actor) -> list[str]:
+	outgoing = [t for t in workflow.transitions if (t.state or "").strip() == new_state]
+	if not outgoing:
+		return []
+
+	named = [u for u in (get_condition_user(doc, t.condition) for t in outgoing) if u]
+
+	# The role fan-out is a fallback, not an addition. A state this document
+	# was born into is usually reachable both by the one approver a condition
+	# names and by a role that may hold a hundred people -- announcing a new
+	# document to all of them is noise, and the named approver is the person
+	# who actually has to act. Roles are used only when no transition out of
+	# this state narrows it to anybody.
+	if not named:
+		for transition in outgoing:
+			named.extend(get_role_users(transition.allowed, doc, new_state))
+
+	return to_emails(named, actor)
+
+
+def to_emails(users, actor) -> list[str]:
 	actor_email = get_user_email(actor)
 
 	emails, seen = [], set()
