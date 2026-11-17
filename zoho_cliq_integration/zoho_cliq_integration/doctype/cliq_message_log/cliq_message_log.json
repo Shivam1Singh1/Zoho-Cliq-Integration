@@ -16,12 +16,14 @@
   "trigger_state",
   "routing_section",
   "recipient_user",
+  "resolved_via",
   "column_break_routing",
   "attempts",
   "sent_at",
   "content_section",
   "subject",
   "message",
+  "card_data",
   "result_section",
   "error",
   "response"
@@ -34,7 +36,7 @@
    "in_list_view": 1,
    "in_standard_filter": 1,
    "label": "Status",
-   "options": "Queued\nSent\nUndelivered\nFailed\nSkipped\nDry Run",
+   "options": "Queued\nSent\nUndelivered\nFailed\nSkipped\nSkipped - No Recipient\nSkipped - Recipient Not Allowed\nDry Run",
    "read_only": 1
   },
   {
@@ -48,10 +50,10 @@
   {
    "fieldname": "delivery_mode",
    "fieldtype": "Select",
-   "label": "Delivery Mode",
-   "options": "\nDirect Message\nChannel",
    "in_list_view": 1,
    "in_standard_filter": 1,
+   "label": "Delivery Mode",
+   "options": "\nDirect Message\nChannel",
    "read_only": 1
   },
   {
@@ -95,6 +97,13 @@
    "read_only": 1
   },
   {
+   "description": "Which rule named this recipient. Lets a wrong recipient be traced to the field that produced it.",
+   "fieldname": "resolved_via",
+   "fieldtype": "Data",
+   "label": "Resolved Via",
+   "read_only": 1
+  },
+  {
    "fieldname": "column_break_routing",
    "fieldtype": "Column Break"
   },
@@ -129,6 +138,15 @@
    "read_only": 1
   },
   {
+   "depends_on": "card_data",
+   "description": "The structured part of the Cliq payload (card, slides, buttons) sent alongside the text. Empty for a plain-text message.",
+   "fieldname": "card_data",
+   "fieldtype": "Code",
+   "label": "Card Data",
+   "options": "JSON",
+   "read_only": 1
+  },
+  {
    "fieldname": "result_section",
    "fieldtype": "Section Break",
    "label": "Result"
@@ -149,7 +167,7 @@
  ],
  "index_web_pages_for_search": 1,
  "links": [],
- "modified": "2026-10-09 10:00:00.000000",
+ "modified": "2026-11-17 13:00:00.000000",
  "modified_by": "Administrator",
  "module": "Zoho Cliq Integration",
  "name": "Cliq Message Log",

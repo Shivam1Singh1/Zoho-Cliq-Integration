@@ -1,7 +1,7 @@
 # Zoho Cliq Integration
 
-Send ERPNext workflow alerts into Zoho Cliq — as direct messages to the people a
-workflow is waiting on, or as a post into a shared channel.
+Send a Zoho Cliq message to the project manager a Material Request is waiting
+on — as a direct message, or as a post into a shared channel.
 
 This file is the app's design documentation. Every non-obvious decision in the
 code is recorded here, grouped by the module it belongs to. The one module that
@@ -24,37 +24,60 @@ wiring and is best read in place.
 
 ## What it does
 
-A document changes workflow state. The people who now have to act on it get a
-Cliq message, and so does the person who handed it on. Nobody tells the person
-who just acted, because they already know.
+A Material Request enters **Pending from Project Manager**. The project manager
+it is now waiting on gets one Cliq message. That is the entire behaviour.
 
-**There is exactly one way in, and no doctype is named anywhere in this app.**
-You tick a doctype in **Cliq Notification Settings**; from then on its
-creation and every workflow-state change on it are announced, and who to tell is
-read off that doctype's own active Workflow. Adding a doctype is configuration,
-never code.
+**One doctype, one state, one direction.**
 
-That single entry point is deliberate. Two earlier paths were removed because
-each one knew something it had no business knowing:
-
-| Removed path | Why it went |
+| | |
 |---|---|
-| `events/leave_application.py` | Named one doctype in code and messaged one fixed person from settings. Nothing about it generalised. |
-| `overrides/notification.py` | Added `Cliq` as a channel on Frappe's Notification doctype — a second, parallel place to configure the same integration, with its own recipient list that could disagree with the Workflow. |
+| Doctype | Material Request, and nothing else |
+| State | `Pending from Project Manager`, and no other |
+| Direction | outbound only — to the approver, never back to the requester |
+
+The last row is a deliberate constraint, not an omission. An approval, a
+rejection, a send-back and a cancellation all pass in silence: the requester
+either performed the action or will see it on the document, and a message
+saying so is noise. There is no template for any of them.
+
+**The switch is a row, not a deploy.** The handler will not fire unless
+`Material Request` is listed in **Cliq Notification Settings**. Remove the row
+and the app goes quiet from the next save onward; the row is seeded on install
+and on the first migrate of a site that has no list at all.
+
+Three earlier paths were removed or retired because each one sent more than
+this:
+
+| Retired path | Why it went |
+|---|---|
+| `events/leave_application.py` | Named one doctype in code and messaged one fixed person from settings. Deleted. |
+| `overrides/notification.py` | Added `Cliq` as a channel on Frappe's Notification doctype — a second, parallel place to configure the same integration. Deleted. |
+| `workflow_notify.py` + `cliq_sender.py` | A wildcard rule on `doc_events["*"]` that announced every workflow-state change on every doctype listed in Cliq Notification Settings, and the sender it enqueued. Deleted. |
+| `purchase_order_notify.py` + `Cliq Purchase Approver` | A Purchase Order handler keyed by COM/SER/IT branch, and the approver table it read. Deleted, table empty. |
+
+The last two were unhooked first and kept dormant for a while. That turned out
+to be the worse of the two options: code nothing calls is code nobody reads,
+and it still has to be understood by whoever comes next. Git has them.
 
 If you are looking for the Notification-rule behaviour, see
 [Withdrawing the Notification channel](#withdrawing-the-notification-channel)
-below — the upgrade path is a tick in Cliq Notification Settings.
+below.
 
 ## Architecture
 
 ```
-TRIGGER                   DECIDE (who)       QUEUE               DELIVER
-────────────────────────  ─────────────────  ──────────────────  ──────────────
-any save, any doctype  →  is it ticked in    background worker   _post() → Zoho
-(doc_events["*"])         Cliq Notification                   →
-                          Settings?       →  the doctype's
-                                             active Workflow
+TRIGGER                   DECIDE (who)        QUEUE               DELIVER
+────────────────────────  ──────────────────  ──────────────────  ──────────────
+Material Request save  →  state now 'Pending  background worker   _post() → Zoho
+(on_update,               from Project     →  one message,     →
+ on_update_after_submit)  Manager'?           one recipient
+
+                          the project manager:
+                            1. MR.custom_project_head_name  (if an address)  ← the one that answers
+                            2. MR.custom_project_lead_name  (if an address)
+                            3. Project.custom_project_lead  (Link → Employee)
+                            4. Project.custom_project_lead_name (if an address)
+                            5. Employee Function.project_list[project].project_head
 ```
 
 Two properties hold on every path:
@@ -69,12 +92,29 @@ leave request to break.
 
 ## Verified Zoho API behaviour
 
-Both of these were found against a live bot, not assumed, and both shape the
+All of these were found against a live bot, not assumed, and each one shapes the
 code:
 
 **`userids` must be a comma-separated string.** Sent as a JSON array the API
 returns HTTP 400 with an empty body — every time, with no error text to work
 from.
+
+**A button label is capped at 20 characters.** Longer and the whole message is
+rejected with HTTP 400 `{"code": "input_maxlength_reached"}` — the card does not
+degrade, nothing is delivered. `"Open MAT-MR-2026-03832"` is 22 and was the first
+thing that failed, which is why `BUTTON_LABEL` is a fixed string rather than a
+template and is truncated to `BUTTON_LABEL_LIMIT` regardless.
+
+**`card`, `slides` and `buttons` sit beside `text`, not inside it.** They are
+top-level keys of the same JSON body. `text` is still worth sending with a card:
+it is the line rendered above it, and it is also what the chat-list preview and
+the push notification show, where the card is not rendered at all.
+
+**A button's URL is opened by the reader's browser, not by Cliq.** It must
+therefore be an address that resolves from *their* machine. Frappe builds it from
+`host_name` in `site_config.json`, and with that unset `get_url_to_form` falls
+back to the site's own name — producing `http://site_local/app/...`, which is a
+valid-looking link that opens nothing. The button is only as good as `host_name`.
 
 **HTTP 200 does not mean delivered.** An address Cliq cannot resolve comes back
 200 with `{"user_ids": [], "users": []}` — accepted, and delivered to nobody.
@@ -86,134 +126,156 @@ hide every address mismatch in the company behind a green tick.
 
 ## Module notes
 
-### `workflow_notify.py` — who to tell
+### `notifications/` — one module per doctype
 
-Registered against `doc_events["*"]`, so this runs on every document save on the
-site. The first two lines of `on_update` are therefore the hot path: one cache
-read for the enabled list, then one in-memory field comparison. Nothing else
-happens for a doctype that is not ticked.
+```
+notifications/
+  __init__.py          what the package is
+  common.py            resolution, rendering and queueing, shared
+  material_request.py  the only handler, and the only doctype
+```
 
-That wildcard is what keeps the app doctype-agnostic. The alternative — naming
-doctypes in `hooks.py` — would mean a code change and a restart for every new
-one, which is exactly what this app no longer does.
+**A doctype's file holds everything about that doctype** — the states it reacts
+to, how it finds the person to tell, and every word it can say. Nothing about
+one doctype is spread across two files, and nothing in `common.py` names a
+doctype. Adding one is a new file here plus a line in `hooks.py`; touching one
+cannot disturb another.
 
-Who gets told comes entirely from the doctype's own active Workflow, so one rule
-serves every doctype:
+The wording still lives apart from the logic, but as a fenced block at the top
+of the file rather than a second module. Nothing below that banner is logic and
+nothing above it is a sentence, so rewording is still a change to one place —
+without the import round-trip that two files cost.
 
-- **forward** — whoever must act on the state the document just entered. Read off
-  the transitions leaving that state. A state with no outgoing transitions is
-  final, and nobody is waiting.
-- **reply** — whoever made the previous transition, so the person who handed the
-  document on learns what became of it.
-- **creation** — the one person the workflow names as having to act on the state
-  the document was born into.
+### `notifications/common.py` — what they share
 
-With three levels: 1→2 tells L2; 2→3 tells L3 and replies to L1; the final
-approval replies to L2. The person who just acted is never told.
+Nothing in here names a doctype, reads a doctype-specific field, or contains a
+sentence a user will read:
 
-**A creation is not a transition, and `get_creation_recipients()` is separate
-because of it.** There is no previous state, so there is no reply recipient; and
-the role fan-out is a *fallback* here rather than an addition. A state a document
-is born into is typically reachable both by the one approver a condition names
-and by a role that may hold a hundred people — on this site, creating a leave
-resolves to **one** recipient through the condition, where the same state
-*entered by a transition* resolves to 21. Announcing a brand-new document to all
-21 would be noise, and the named approver is the person who actually has to act.
-Roles are consulted only when no transition out of that state narrows it to
-anybody.
+| | |
+|---|---|
+| `state_transition()` | did the workflow state actually move? Returns `(old, new)` or `None` |
+| `enqueue_job()` | hand the transition to a worker, exactly once |
+| `deliver()` | turn a plan into log rows and queued messages |
+| `resolve_email()` | a User link, an Employee id or an address → an address |
+| `dedupe()` | one message per person, never one back to the actor |
+| `render()` | template + context → message body |
+| `form_url()`, `state_label()` | a link that opens from outside; the duplicate-guard key |
 
-Both paths live in `on_update`, which Frappe runs on insert as well. A new
-document is told apart by `get_doc_before_save()` returning `None` — that absent
-snapshot *is* the signal, and it used to be an early `return`, which is why
-creation went unannounced until this was added.
+Only one handler uses these today, which makes the split look like ceremony.
+It stays because it is the seam a second doctype gets added along, and because
+every function here would serve that one unchanged.
 
-**Condition parsing.** A transition whose condition names a document field — the
-common `doc.leave_approver == frappe.session.user` shape — identifies one
-specific person who must act. Notifying the whole role in that case would be
-wrong as well as loud: on this site 125 users hold Leave Approver and exactly one
-of them can move the document.
+**`state_transition()` orders its checks by cost.** `has_value_changed` is an
+in-memory field comparison, so a save that did not touch the workflow state —
+the overwhelming majority — costs that and nothing else; only then is the
+before-snapshot read. A document created directly into a state has no `before`,
+and that is a real transition with an empty `old_state`, not a non-event.
 
-**`MAX_ROLE_RECIPIENTS = 10`.** A backstop for roles with no such condition.
-Exceeding it is logged, never silently truncated — a capped fan-out that looked
-complete would be worse than a loud one.
+**`deliver(..., key_by_audience=)`** decides whether the audience goes into the
+duplicate-guard key. A handler that sends two messages for one transition needs
+it — in Channel mode both resolve to the same channel, and without it the guard
+swallows the second. Material Request sends one message and passes it off, which
+keeps the log readable; Purchase Order sends several and sets it.
+
+### `notifications/material_request.py` — the one handler that runs
+
+Registered against `doc_events["Material Request"]` on both `on_update` and
+`on_update_after_submit`. Every state in `Purchase Requisition Matrix` is
+doc_status 0 except the two terminal approvals, and `apply_workflow` reaches
+those through `doc.submit()`, which runs `on_update` before `on_submit` — so
+`on_update` alone already sees the transition. The second event costs one
+`has_value_changed` call and covers any future allow-on-submit edit. There is
+no `on_cancel`: cancelling tells the requester nothing they did not just do.
+
+The guard runs in cheapening order and nothing escapes it:
+
+1. a cached membership test against **Cliq Notification Settings**
+2. `has_value_changed(workflow_state)` — an in-memory field comparison
+3. `new_state == "Pending from Project Manager"` — a string equality
+4. the before-snapshot differs, so a re-save of the same state is silent
+
+**Finding the project manager is the only hard part.** The approver is not in
+the Workflow. `Purchase Requisition Matrix` gates the transition by role, and
+`Projects Manager` has 23 holders — the role says who *may* act, never who
+*must*. The address is on the document instead, and five sources are tried in
+turn, nearest the document first:
+
+| # | Source | Why it is where it is |
+|---|---|---|
+| 1 | `Material Request.custom_project_head_name` | **The one that answers.** The form fills this with the project manager's address. Across 17,700 documents it is the only field that ever holds an email. |
+| 2 | `Material Request.custom_project_lead_name` | The **Project Lead Name** field, and a trap: it is the obvious-looking one and it holds an email in **zero** of those 17,700 records. It stays as a fallback and must never be first. |
+| 3 | `Project.custom_project_lead` | `Link → Employee`, so it resolves to a real address. Set on 24 of 190 projects here; all 24 resolve. |
+| 4 | `Project.custom_project_lead_name` | The same free-text field one level up, for a document whose copy was never fetched. |
+| 5 | `Employee Function.project_list[project].project_head` | The route this module used originally. Needs the document to carry an Employee Function *and* that function to map a head for this exact project. |
+
+Ordering 1 and 2 the wrong way round is not hypothetical — it shipped, and
+every notification silently skipped. `MAT-MR-2026-03944` carried
+`bhanu.bisht@microcrispr.com` in field 1 while the code read field 2, found a
+blank, walked a chain that was also blank, and logged
+`Skipped - No Recipient`. The trigger was never at fault, which is exactly what
+made it hard to see.
+
+**Exactly one person, always.** Every branch returns on first match, so a
+project mapped in two places cannot produce two messages — the nearest source
+wins and the rest are never read. Audited across all 17,700 documents: no
+record resolves to more than one recipient, and no two sources disagree on who
+the manager is.
+
+None resolving is a **configuration gap, not a failure** — it lands in Cliq
+Message Log as `Skipped - No Recipient`, naming every place that was looked at,
+and never reaches the Error Log.
+
+**Every message records which source named the recipient**, in the log's
+`resolved_via` field: `Material Request.custom_project_head_name`, or
+`Employee Function VP-LTP-PDV-001.project_head[PLTP-2025-0045]`. An approver
+who says "I'm not the manager for this" can be answered from the row rather
+than argued with.
+
+**`resolve_email()` tries four places** because the leads above are
+`Link → User` *or* `Link → Employee`, and several hold employee numbers with no
+User record behind them. It falls through the Employee fields in the order this
+site actually populates them: `user_id` (696/710), `company_email` (686),
+`prefered_email` (683).
 
 **Deduplication.** One transition saves the document more than once — seven to
-eight hook invocations were observed for a single approval, two of them for the
-document itself — so without this the same message is sent twice. A `job_id`
-alone does *not* dedupe: `frappe.enqueue` takes `deduplicate=False` by default.
+eight hook invocations were observed for a single approval — so without this
+the same message goes out twice. A `job_id` alone does *not* dedupe:
+`frappe.enqueue` takes `deduplicate=False` by default. `queue_message` then
+guards again on `(reference, trigger_state, target)`, which is what makes the
+worker idempotent.
 
-**Identity comparison uses the email, not just the user id.** The same person can
-arrive as a User id from a role and as a differently-cased id from a transition
-condition, and only the address is a reliable identity.
+**The actor is never the recipient.** In practice the project manager is never
+the person who moved the document into this state, but a direct edit by them
+would otherwise bounce straight back.
 
-**`get_reply_recipient()` — three sources, in order, and the order is the whole
-point.** The obvious two are both unreliable here:
+**`Administrator` is never a recipient.** It is a shared login, not a person
+with a Cliq account.
 
-| Source | Why it is not enough alone |
-|---|---|
-| `Version` | Only exists where the doctype has `track_changes` on. Leave Application on this site does not, so it returns nothing. |
-| `Workflow Action` | `completed_by` is filled in when Frappe closes out the action, and a leftover Open action gets attributed to whoever triggered the *next* step — observed here as the Pending Leave Approval row reading `completed_by` = the head approver after they acted. Useful when it agrees, never trusted alone. |
-| `before.modified_by` | The pre-save snapshot — whoever last saved the document, which is exactly the previous actor. |
+**The message is a Cliq card, not a paragraph.** The text half is one bold line
+— `"{mr}: your approval needed"` — and everything the approver needs is in the
+card under it: the document's own title, then `CARD_ROWS` as a two-column table,
+then one button to the form.
 
-The last one **must** come off `before` and not off `doc`:
-`set_user_and_timestamp()` has already rewritten `doc.modified_by` to the current
-user by the time an `on_update` hook runs, so reading it from `doc` yields the
-person who just acted, and the reply is then dropped as self-notification.
+The line above the card deliberately says nothing the card repeats. An earlier
+draft read *"MAT-MR-… raised by Developer is pending your approval"* while the
+table already carried a `Created By` row — the same fact twice, in the two places
+a reader looks first.
 
-**`get_actor_from_workflow_actions()`** skips the current actor, which is what
-makes it the *previous* transition rather than this one — whose row is written
-during this same save.
+`CARD_ROWS` *is* the card. Adding or reordering a row is one line in that tuple
+and nothing else; the label is what Cliq shows and the fieldname is read off the
+document. An empty value is dropped rather than rendered blank — a row reading
+`Project Description` with nothing after it is noise, and on a phone every row
+dropped is one more real row visible without scrolling.
 
-**`Administrator` is never a recipient.** It is a shared login, not a person with
-a Cliq account.
+The `slides` type is `table`, with `CARD_HEADERS` naming the two columns. The
+alternative, `label`, renders the same pairs as a vertical list with no header
+row. Both were sent to a live bot and compared side by side; the table won.
 
-### `cliq_sender.py` — one workflow-state message
-
-Renders and delivers a workflow-state message to every recipient in one call.
-Runs in a background worker: `workflow_notify` enqueues it after commit.
-
-The HTTP call is delegated to `cliq.client._post`. That matters more than it
-looks — re-implementing the call here would rediscover both Zoho findings above
-the hard way.
-
-Bot name, zapikey and data-centre domain are read from Cliq Settings, and are
-deliberately not duplicated onto Cliq Notification Settings: one integration, one
-place for its credentials.
-
-**`build_plans()` picks a target per mode.** In channel mode `_post` treats its
-target argument as a channel name and puts it in the URL; handing it a
-comma-joined list of emails there would build a nonsense request. So each mode
-gets its own target, and the log records what that route actually sent to while
-`intended` still records the real recipients.
-
-**`resolved_user_ids()` returns `None`, not `[]`, for a body it cannot parse.**
-The caller treats `None` as "no verdict" and leaves the send counted as
-delivered. An empty list means Zoho explicitly matched nobody; conflating the two
-would cry wolf on every response shape Zoho ever changes.
-
-**`record()` never raises.** Losing the audit row must not lose the message. The
-outcome goes to Cliq Message Log, and it keeps the API's own verdict.
-`frappe.logger` would not: Frappe's default level is WARNING and an `info()` call
-is dropped on the floor — which is exactly how the first run of this looked
-delivered while leaving no trace at all.
-
-**`fit()`.** Joins addresses into a `Data(140)` field without losing the count.
-Plain truncation reads as a complete list in the log while quietly dropping names
-off the end — which is how a nine-recipient fan-out appeared to stop at six. The
-full list is in `response`.
-
-**`state_label()` and the creation wording.** An empty `old_state` means a
-creation. Rendered naively that produces `" -> Pending"`, which reads as a value
-that went missing, so a creation is labelled `(new) -> Pending` instead — and
-since `trigger_state` is the duplicate guard's key, that label has to be stable
-rather than merely tidy. The message headline likewise says
-`Leave Application created: …` and credits the raiser rather than an actioner,
-because on a creation nobody has acted yet.
-
-**`build_message()`** uses one format for every doctype, so nothing here is
-doctype-specific. `applicant` is whatever the document calls a person —
-`employee_name` where it exists — and is simply omitted when the doctype has no
-such field.
+One row is not on the reference card: **Remark**, appended when the transition
+carried one. At this point in the chain that remark is whatever the previous
+approver wrote on the way past, and the person now being asked to approve is the
+one who benefits from reading it. It is absent when there is none, so the card is
+otherwise unchanged.
 
 ### `cliq/client.py` — delivery of a single message
 
@@ -224,11 +286,11 @@ Two entry points:
   touches the network.
 - **`deliver()`** runs in a background worker and performs the HTTP call.
 
-Since the Notification channel was withdrawn, the only caller of `queue_message`
-is `send_test_message()`. The retry, duplicate-guard and logging machinery is
-kept rather than folded into `cliq_sender`, because the test button is the one
-thing that must prove the *whole* delivery path — settings, identity mapping,
-both modes and the real HTTP call — before anyone trusts it in production.
+`queue_message` has two callers: `notifications/common.deliver()`, which is how
+every per-doctype handler sends, and `send_test_message()`. The second matters
+as much as the first — the test button is the one thing that proves the *whole*
+delivery path (settings, identity mapping, both modes and the real HTTP call)
+before anyone trusts it in production.
 
 **Retry policy.** `RETRYABLE_STATUS = (408, 429, 500, 502, 503, 504)` — worth
 another try, because the far end was busy, throttled, or briefly unavailable.
@@ -303,15 +365,21 @@ cheap queries that find nothing.
 
 **`seed_settings()`** creates the Single with safe defaults: off, and in dry run.
 
+**`seed_notification_doctype()`** puts `Material Request` in the list, once, on
+a site whose list is empty. The handler will not fire for a doctype that is not
+listed, so an empty table means nothing is ever sent — and a silent install is
+worse than a wrong one. A table with anything in it is left alone, so an
+administrator who clears the row has said no and is not overruled on the next
+migrate.
+
 ### Doctypes
 
-**Cliq Notification Settings** — the only place a doctype is named. Lists which
-doctypes send a Cliq message when their workflow state changes.
-`get_enabled_doctypes()` is read on every document save on the site, because the
-event handler is registered against `doc_events["*"]`. It must therefore cost one
-cache read and nothing else — never a query. `on_update` drops the cache, which
-is what makes an unchecked box or a deleted row take effect on the next save
-rather than on the next restart.
+**Cliq Notification Settings** — the on/off switch, and the only place a
+doctype is named. Only `Material Request` does anything; listing anything else
+is inert now that the wildcard rule is unhooked. `get_enabled_doctypes()` is
+read on every Material Request save, so it must cost one cache read and nothing
+else — never a query. `on_update` drops the cache, which is what makes an added
+or deleted row take effect on the next save rather than on the next restart.
 
 It is **deliberately not whitelisted**: it is called from the document hook, never
 from the client, and exposing it would hand any logged-in user a list of which
@@ -338,7 +406,12 @@ rejected, since it still works everywhere else in Frappe.
 
 **Cliq Message Log** — one row per message, successful or not. This is both the
 audit trail and the duplicate guard. `delivery_mode` records which route the row
-went out on.
+went out on, and `card_data` holds the structured half of the payload — the
+`card`, `slides` and `buttons` that went out beside `text`. It is empty for a
+plain-text message, which is what makes the card optional: a handler with
+nothing structured to say omits it and the payload is byte-for-byte what it was
+before cards existed. A row whose `card_data` will not parse degrades to a
+plain-text send rather than failing delivery.
 
 `clear_old_logs()` is a scheduled trim: successful and dry-run rows age out;
 **failures are kept**.
@@ -349,8 +422,9 @@ went out on.
 
 Two doctypes, and they answer different questions.
 
-**Cliq Notification Settings — *which doctypes*.** One row per doctype, each with
-an `enabled` tick. This is the whole of "what does this app watch".
+**Cliq Notification Settings — *which doctypes*.** One row per doctype. The row's
+presence is the switch — there is nothing to tick. This is the whole of "what
+does this app watch".
 
 **Cliq Settings — *how to send*.**
 
@@ -404,14 +478,15 @@ is gone, and `bench migrate` cleans up after it: the Property Setter is deleted,
 and any Notification rule still set to channel `Cliq` is **disabled** and named in
 an Error Log entry so the change is not silent.
 
-Nothing a user authored is deleted. To get those alerts back, tick the rule's
-doctype in Cliq Notification Settings. The difference to expect:
+Nothing a user authored is deleted. There is no longer a like-for-like
+replacement, though: this app now sends one message, for one doctype, in one
+state. The difference to expect:
 
-| | Notification rule | Cliq Notification Settings |
+| | Notification rule | This app |
 |---|---|---|
-| Recipients | a list you maintain on the rule | the doctype's active Workflow |
-| Message | your Jinja template | one built-in format for every doctype |
-| Triggers | any event, plus a condition | creation and workflow-state change |
+| Recipients | a list you maintain on the rule | the project manager, resolved from the document |
+| Message | your Jinja template | one built-in format |
+| Triggers | any event, plus a condition | Material Request entering `Pending from Project Manager` |
 
 The recipient row is the reason for the change: a hand-maintained list drifts out
 of step with the workflow it is supposed to mirror, and then the wrong person is
@@ -449,7 +524,7 @@ bench get-app $URL_OF_THIS_REPO --branch develop
 bench install-app zoho_cliq_integration
 ```
 
-Then, in the site: fill in **Cliq Settings**, tick the doctypes you want in
+Then, in the site: fill in **Cliq Settings**, list the doctypes you want in
 **Cliq Notification Settings**, and leave `dry_run` on until the Send Test
 Message button comes back `Sent`.
 

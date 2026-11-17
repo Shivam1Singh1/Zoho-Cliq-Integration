@@ -27,7 +27,9 @@
   "timeout",
   "max_attempts",
   "column_break_delivery",
-  "log_successful_sends"
+  "log_successful_sends",
+  "safety_section",
+  "allowed_email_domains"
  ],
  "fields": [
   {
@@ -37,14 +39,12 @@
   },
   {
    "default": "0",
-   "description": "Master switch. When off, no Cliq message is sent or logged.",
    "fieldname": "enabled",
    "fieldtype": "Check",
    "label": "Enabled"
   },
   {
    "default": "1",
-   "description": "Render and log every message but never call Zoho. Keep this ON until the bot token is live and outbound access to the API domain is open.",
    "fieldname": "dry_run",
    "fieldtype": "Check",
    "label": "Dry Run (do not actually send)"
@@ -59,20 +59,17 @@
    "label": "Status"
   },
   {
-   "description": "Supplied by the Zoho Cliq administrator. The bot must be configured as 'Bot works for: Organization'.",
    "fieldname": "bot_section",
    "fieldtype": "Section Break",
    "label": "Bot"
   },
   {
-   "description": "The bot's unique name, not its display name.",
    "fieldname": "bot_unique_name",
    "fieldtype": "Data",
    "label": "Bot Unique Name"
   },
   {
    "default": "cliq.zoho.in",
-   "description": "Data centre host, without https:// — for example cliq.zoho.in or cliq.zoho.com.",
    "fieldname": "api_domain",
    "fieldtype": "Data",
    "label": "API Domain"
@@ -82,7 +79,6 @@
    "fieldtype": "Column Break"
   },
   {
-   "description": "Webhook token. Generate it from a service account, never a personal user, so alerts survive staff changes.",
    "fieldname": "zapikey",
    "fieldtype": "Password",
    "label": "Zapikey"
@@ -94,7 +90,6 @@
   },
   {
    "default": "user_id",
-   "description": "Which Employee field holds the address the person logs into Cliq with. Recipients are resolved from the document, then mapped through this field.",
    "fieldname": "identity_field",
    "fieldtype": "Select",
    "label": "Cliq Identity Field",
@@ -113,7 +108,6 @@
   },
   {
    "default": "3",
-   "description": "Total tries per message before it is marked Failed. Retries apply to timeouts and 5xx responses only.",
    "fieldname": "max_attempts",
    "fieldtype": "Int",
    "label": "Max Attempts"
@@ -124,7 +118,6 @@
   },
   {
    "default": "1",
-   "description": "Write a Cliq Message Log row for successful sends as well as failures.",
    "fieldname": "log_successful_sends",
    "fieldtype": "Check",
    "label": "Log Successful Sends"
@@ -136,7 +129,6 @@
   },
   {
    "default": "Direct Message",
-   "description": "Direct Message sends to each resolved recipient via the bot. Channel posts once into the channel below. Both does each, for the same event.",
    "fieldname": "target_type",
    "fieldtype": "Select",
    "label": "Send To",
@@ -144,7 +136,6 @@
   },
   {
    "depends_on": "eval:doc.target_type=='Channel'",
-   "description": "The channel's unique name, not its display name. Find it in the channel's settings.",
    "fieldname": "channel_unique_name",
    "fieldtype": "Data",
    "label": "Channel Unique Name"
@@ -155,16 +146,27 @@
   },
   {
    "depends_on": "eval:doc.target_type=='Direct Message'",
-   "description": "While set, every direct message goes to this one address no matter who it resolved to. The log keeps the intended recipient. Needed when the bot is Personal, and a useful safety net on staging. Leave blank in production.",
+   "description": "Must be empty in production — while set, every message goes here instead of to the real recipient.",
    "fieldname": "test_redirect",
    "fieldtype": "Data",
    "label": "Test Redirect (send everything here)"
+  },
+  {
+   "fieldname": "safety_section",
+   "fieldtype": "Section Break",
+   "label": "Safety"
+  },
+  {
+   "default": "microcrispr.com",
+   "fieldname": "allowed_email_domains",
+   "fieldtype": "Small Text",
+   "label": "Allowed Email Domains"
   }
  ],
  "index_web_pages_for_search": 1,
  "issingle": 1,
  "links": [],
- "modified": "2026-10-09 10:00:00.000000",
+ "modified": "2026-11-17 15:00:00.000000",
  "modified_by": "Administrator",
  "module": "Zoho Cliq Integration",
  "name": "Cliq Settings",

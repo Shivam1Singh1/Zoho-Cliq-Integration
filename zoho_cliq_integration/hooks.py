@@ -1,16 +1,15 @@
 """App manifest.
 
 Everything this app adds to a site is declared at the bottom of this file: one
-wildcard document hook that watches every save for a workflow-state change on a
-doctype listed in Cliq Notification Settings. The commented blocks in between
-are Frappe's scaffolding, left as generated.
+document hook on Material Request. The commented blocks in between are
+Frappe's scaffolding, left as generated.
 """
 
 app_name = "zoho_cliq_integration"
 app_title = "Zoho Cliq Integration"
 app_publisher = "MicroCRISPR"
 app_description = "Send ERPNext document alerts as Zoho Cliq direct messages"
-app_email = "vinay.harane@microcrispr.com"
+app_email = "shivam.singh@microcrispr.com"
 app_license = "mit"
 
 # Apps
@@ -260,27 +259,36 @@ app_license = "mit"
 # Zoho Cliq Integration
 # ---------------------
 
-# Which doctypes send a message is data, not code: Cliq Notification Settings
-# lists them, and recipients come from each doctype's own Workflow. Hence the
-# wildcard -- the hook cannot name the doctypes up front. The handler's first
-# act is a cached membership test, so a doctype nobody configured costs one
-# cache read and nothing else.
+# Material Request is the only doctype this app notifies on, and the only
+# state it reacts to is 'Pending from Project Manager'. Messages travel one
+# way -- to the project manager the document is now waiting on, and to nobody
+# else. Nothing is sent back to the requester at any point in the chain.
 #
-# No doctype is named anywhere in this app. One rule serves all of them, and
-# the only way to add one is to tick it in Cliq Notification Settings.
+# It gets a named hook rather than a wildcard because its approver is not in
+# the Workflow. The workflow gates transitions by role -- 'Projects Manager'
+# has 23 holders -- so the role says who *may* act, never who *must*. The one
+# person a given document waits on is its project lead. See
+# notifications/material_request.py.
 #
-# The three events are not interchangeable. `on_update` misses a transition
-# between two submitted states -- which is how an allow-on-submit workflow
-# field changes, and it reaches only on_update_after_submit -- and cancellation
-# reaches only on_cancel. The same guarded handler takes all three, and the
-# has_value_changed check makes the extra paths free.
-_WORKFLOW_HOOK = "zoho_cliq_integration.workflow_notify.on_update"
+# Both update events are registered. `on_update` misses a transition between
+# two submitted states -- which is how an allow-on-submit workflow field
+# changes, and it reaches only on_update_after_submit. The same guarded
+# handler takes both, and the has_value_changed check makes the extra path
+# free. There is no on_cancel: cancelling tells the requester nothing they
+# did not just do themselves.
+#
+# Every handler lives in `notifications/`, one module per doctype, and the
+# only way one runs is a line in this dict. There is one handler, because
+# there is one doctype. The wildcard rule that once served every doctype in
+# Cliq Notification Settings, its sender, and a Purchase Order handler have
+# all been deleted rather than left dormant -- code nothing calls is code
+# nobody maintains, and git still has them.
+_MR_HOOK = "zoho_cliq_integration.notifications.material_request.on_workflow_state_change"
 
 doc_events = {
-	"*": {
-		"on_update": _WORKFLOW_HOOK,
-		"on_update_after_submit": _WORKFLOW_HOOK,
-		"on_cancel": _WORKFLOW_HOOK,
+	"Material Request": {
+		"on_update": _MR_HOOK,
+		"on_update_after_submit": _MR_HOOK,
 	},
 }
 

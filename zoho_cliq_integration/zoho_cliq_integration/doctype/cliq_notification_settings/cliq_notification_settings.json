@@ -10,7 +10,7 @@
  ],
  "fields": [
   {
-   "description": "Documents of these doctypes send a Cliq message on every workflow state change. Uncheck or remove a row to stop it from the next save onward.",
+   "description": "Only Material Request is wired up. Listing it here keeps it active: a Material Request entering 'Pending from Project Manager' sends one message to its project manager, and nothing else is ever sent. Remove the row to stop it from the next save onward.",
    "fieldname": "doctypes_list",
    "fieldtype": "Table",
    "label": "Doctypes",
@@ -21,7 +21,7 @@
  "index_web_pages_for_search": 1,
  "issingle": 1,
  "links": [],
- "modified": "2026-10-10 11:27:26.104081",
+ "modified": "2026-11-17 11:30:00.000000",
  "modified_by": "Administrator",
  "module": "Zoho Cliq Integration",
  "name": "Cliq Notification Settings",
