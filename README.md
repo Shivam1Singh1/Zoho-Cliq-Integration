@@ -277,6 +277,205 @@ approver wrote on the way past, and the person now being asked to approve is the
 one who benefits from reading it. It is absent when there is none, so the card is
 otherwise unchanged.
 
+**A fieldname may be a dotted path**, read off the records the document links to
+rather than off the document — `follow_link` walks it, taking each hop's target
+doctype from the field's own `options`, so no doctype is named in the row. What
+is stored is a code or a login; what the approver wants is a person.
+`custom_employee_function.function_head_name` is one hop to a Data field,
+`custom_employee_function.reporting_head.full_name` is two because the function
+stores the reporting head as a `Link → User` with no name field beside it.
+
+**Only the last hop falls back to what it was holding; an earlier one that leads
+nowhere drops the row.** 17 of this site's 115 Employee Functions have no
+`function_head_name`, and there the walk ends on `VP-LTP-QCT-001` — poor, but it
+names the function whose head was wanted. One hop earlier the same code would
+appear under **Reporting Head**, where it names nothing and reads as that
+person's id; 106 of the 115 have no `reporting_head` at all, so that is the
+common case and the row goes instead.
+
+**Reporting Head reads the document first, the function second.** Only 50 of
+17,706 Material Requests carry `custom_reporting_head`, but one that does was
+stamped with the head in force when it was raised, while the function's is
+whoever holds the post today. It is `Data` holding an address, so it cannot be
+walked like a Link — `PERSON_FIELDS` swaps it for the name behind it, and the
+address stands if no User carries one.
+
+**Project Manager names the person the card was sent to**, in the same field
+order `resolve_project_manager` uses — so the row shows the field that did the
+addressing. It reads as redundant in a direct message and is not: in Channel
+mode the card is read by people who are not the approver, and a row naming the
+wrong manager is the one visible sign that routing picked the wrong field. When
+addressing falls through to the Project or the Employee Function, the document
+carried no name to print and the row is absent.
+
+**Status is the last row and the only one not read off the document.** The
+handler sends on one state, so the word never varies; the row puts the document
+*waiting on you* in the table instead of leaving it to the subject line. Cliq
+has no colour markup for a table cell, so the colour is an emoji — 🟠 renders in
+every client, including the push preview, where the card does not render at all.
+The bold is `*Pending*`: single asterisks, Cliq's own syntax, the same one
+`build_request` wraps the subject in. **Cliq does render markdown inside a table
+cell** — confirmed against the live bot on MAT-MR-2026-03951, which came back
+with a bold *Pending* beside the disc rather than literal asterisks.
+
+### Changing a message after it was sent
+
+The card is a snapshot of the moment the approval was asked for, and a snapshot
+goes stale: the document gets approved and the card still reads **Pending**. The
+fix is to edit the message already on the approver's screen rather than send a
+second one, so `on_workflow_state_change` grew one more branch — leaving
+`Pending from Project Manager` for any of the three states the workflow allows
+(`Approved by Project Manager`, `Rejected by Project Manger`, `Draft`) queues
+`update_status_messages`, which rebuilds the card and hands it to
+`update_sent_card`. **Nothing is ever sent by that path.** It edits, or it
+records why it could not.
+
+**Status is read off the state, not fixed.** `STATUS_BY_STATE` maps the three
+outcomes to their row; anything else falls back to `STATUS_PENDING`. One
+`build_card` therefore serves both the message that goes out and the corrected
+card that replaces it, which is why `base_context` carries `state`.
+
+**The button goes when the approval lands.** `BUTTONLESS_STATES` drops *Open in
+ERPNext* on `Approved by Project Manager`: the button is a call to action, and
+once the document is approved there is nothing left to act on. A rejection and a
+send-back keep it, because both are states somebody still has to look at the
+document about.
+
+`build_card` always sets `buttons`, empty rather than absent, and that
+distinction carries weight on an edit. A send drops an empty list by itself —
+`build_request` copies only keys that hold something — but a PUT that merely
+omits `buttons` leaves the delivered message's own button sitting there, which
+is the opposite of dropping it. `_put_card` therefore tests `is not None`, so an
+empty list travels as the instruction it is.
+
+**Why the edit is on v3 while sending is on v2.** The v2 edit API accepts `text`
+and nothing else — it would rewrite the line above the card while the table
+under it went on saying Pending. v3 accepts `card`, `slides` and `buttons`.
+
+**A bot post does return a message id — with `sync_message: true`, and not
+where the documentation looks.** The v2 docs say a bot post carries no id, and
+that holds only for the default reply. Asking for a synchronous send changes the
+answer to:
+
+```json
+{"user_ids": ["60062744041"],
+ "message_details": {"60062744041": {"chat_id": "CT_1202000792758724428_60057455509-B2",
+                                     "message_id": "1795071752472%2055609997592"}},
+ "users": ["60062744041"]}
+```
+
+one entry per resolved user, keyed by ZUID. `_remember_message` reads it from
+there and writes it with `db_set` rather than by assignment, because `_finish`
+runs next and writes only the fields it was handed — which is how the first
+version of this silently lost every id it read. The id keeps its
+percent-encoding: it contains a space, already escaped for the URL it will be
+pasted into.
+
+**The edit itself still needs OAuth; a zapikey is refused with HTTP 401.**
+Tested against this bot, not inferred. Two API details cost a round trip each
+and are worth not rediscovering: `text` is **mandatory** on an edit — a body of
+slides alone comes back `param_missing` — and `bot_unique_name` must *not*
+appear in the query, which answers `extra_param_found` and rejects the whole
+request. Parameters are also validated **before** credentials, so a 400 about a
+parameter says nothing about whether the token would have been accepted; only
+once both were right did the honest 401 appear.
+
+The feature is therefore complete except for credentials. Every message sent
+from now on carries its `message_id` and `chat_id` on the log row,
+`update_sent_card` finds the row and builds the corrected card, and the one
+remaining step is an OAuth self-client with `ZohoCliq.Messages.UPDATE` filled
+into the In-Place Updates section of Cliq Settings.
+
+**Keep `log_successful_sends` on if updates matter.** Messages are found through
+their log rows, so a site that deletes the successful ones has nothing left to
+address an edit to.
+
+
+**What a wall looks like.** Each refusal is written to `update_note` on the log
+row rather than to the Error Log — a message that cannot be edited is a
+configuration gap, like a recipient that cannot be addressed, and the row is
+where this app keeps those. The stored `card_data` is refreshed either way, so
+it never contradicts the document even when the delivered message does.
+
+### Acting on the request from Cliq
+
+Five cards for five requests, each naming its own document, each showing where
+it stands, each offering **Approve** and **Reject** only while there is
+something to decide. Pressing one applies the decision in ERPNext and rewrites
+that card.
+
+The press is what makes this possible. An outside event — an approval typed
+into ERPNext — cannot reach back into a sent message without OAuth, but a
+button click hands the bot the message it was pressed on, and a function
+answering that click may return `{"type": "message_edit", ...}` to replace it.
+That is why approval-from-Cliq works today while approval-from-ERPNext still
+waits on credentials.
+
+```
+card button ──invoke.function──▶ Cliq function (Deluge)
+                                      │  POST /api/method/…material_request_action
+                                      ▼
+                                 ERPNext: re-read, check, apply_workflow
+                                      │  returns a complete message_edit map
+                                      ▼
+                                 Cliq replaces the card in place
+```
+
+**The Deluge function holds no logic**, and `cliq_function.deluge` in this repo
+is the whole of it: forward the press, return the answer. ERPNext replies with a
+finished `message_edit` map — text, card, slides and buttons — so there is no
+second copy of the rules living in a language that cannot see the document.
+
+**The document rides on the button's `key`, because there is nowhere else.**
+Cliq validates a button action against a fixed shape and rejects anything else
+in it — including `arguments`, which its own documentation describes as the way
+to pass custom values. Sending one comes back `HTTP 400 extra_key_found:
+'arguments' is an extra key in the JSON Object`, and so does any loose key added
+beside `name` and `owner`. Four shapes were posted to the live bot; only `key`
+survived. So the key reads `approve::MAT-MR-2026-03958` and the handler splits
+it. This is not cosmetic: one approver holds several cards at once, the handler
+is told which button was pressed and nothing about the conversation around it,
+and a button that does not name its own document cannot act on it.
+
+**The card is never the authority.** A card is a picture taken when the message
+was sent and it can be hours stale: the document may have been approved since,
+from another device, or the card forwarded to somebody who was never the
+approver. So `api.material_request_action` trusts nothing in the press. It
+re-reads the document, checks the state is still the one the button claims to
+act on, checks the presser is the person `resolve_project_manager` names, and
+checks they hold the role the transition requires — and only then applies the
+workflow, **as that user**, so the workflow's own rules and `modified_by` are
+about the person who pressed rather than an integration account.
+
+**Every outcome returns a card, including the refusals.** A refusal that
+answered with only an error would leave the stale card sitting there still
+offering a button that does nothing — the exact failure this replaces. Instead
+the message corrects itself and says why:
+
+| What happened | What the card says |
+|---|---|
+| Approved | Status 🟢 **Approved**, no buttons |
+| Pressed again | *Already Approved by Project Manager. This card was sent when it was still waiting, so the buttons are gone now.* |
+| Pressed by someone else | *This request is not waiting on you, so nothing was changed.* |
+| Approver lacks the role | *…acting on it needs the 'Projects Manager' role, which your ERPNext user does not have.* |
+
+That last one is checked here rather than left to `apply_workflow`, which
+refuses with *Not a valid Workflow Action* — true, and no use at all to somebody
+holding a phone. Being the approver named on the document and holding the role
+that may approve it are two different things, and they come apart often enough
+to be worth saying out loud.
+
+**Authentication is Frappe's own.** The function carries an API key and secret
+for a dedicated user, so the endpoint is an ordinary whitelisted method with no
+`allow_guest` and no hand-rolled shared secret. The key only gets the request
+through the door: the pressing user's address travels with it as a *claim*, and
+every check above applies to that claim, so a stolen key still approves nothing.
+
+**Unconfigured sites degrade to what they had.** Both `function_name` and
+`function_owner` must be set in Cliq Settings or `action_buttons` returns
+nothing and the card carries only its link — a button invoking a function Cliq
+cannot resolve would fail in the approver's face.
+
 ### `cliq/client.py` — delivery of a single message
 
 Two entry points:

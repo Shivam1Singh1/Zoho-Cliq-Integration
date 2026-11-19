@@ -9,6 +9,12 @@ other state sends anything, and nothing is ever sent back to the requester --
 the message is one-directional by design, so an approval, a rejection, a
 send-back and a cancellation all pass in silence.
 
+Silence is not the same as leaving it stale. Leaving that state rewrites the
+Status row of the card the approver already has, so the message ages with the
+document instead of freezing at the moment it was sent. That is an edit and
+never a second message; when the edit cannot be made the card stays exactly as
+it was sent and the log row records why.
+
 Finding that one project manager is the only hard part, because the approver
 is not in the Workflow. `Purchase Requisition Matrix` gates the transition by
 role, and 'Projects Manager' has 23 holders -- the role says who *may* act,
@@ -25,6 +31,7 @@ names no doctype.
 import frappe
 from frappe.utils import formatdate
 
+from zoho_cliq_integration.cliq import client
 from zoho_cliq_integration.cliq.client import get_settings
 from zoho_cliq_integration.notifications import common
 from zoho_cliq_integration.zoho_cliq_integration.doctype.cliq_notification_settings.cliq_notification_settings import (
@@ -100,28 +107,133 @@ CARD_ROWS = (
 	("Created By", ("custom_full_name", "custom_created_by", "owner")),
 	("Date", "transaction_date"),
 	("Stages", "custom_stages"),
-	("Function Head", "custom_employee_function"),
 	# The project's name, not its code. 'PLTP-2025-0045' identifies the record;
 	# 'AAV - Huntington Disease - HTT' is what the approver recognises. The code
 	# is the fallback for a record whose name was never fetched.
 	("Project", ("custom_project_name", "project")),
 	("Description", "project_description"),
+	# The people, kept together and kept last. Everything above is the request
+	# -- what is being asked for, for which project, by when -- and these three
+	# are who stands around it. Split across the table they read as more
+	# attributes of the purchase; grouped at the foot they read as a chain of
+	# responsibility, which is what they are, and the eye finds the request
+	# first because the request is what the decision is about.
+	#
+	# Both heads are reached through the Employee Function the document names;
+	# `follow_link` walks the dots. The two paths are not symmetric because the
+	# doctype is not: `function_head_name` is a Data field sitting right there
+	# on the function, while `reporting_head` is a Link to User holding a login
+	# address -- jitendra.vyas@microcrispr.com -- so the readable name is one
+	# hop further on, in the User record.
+	("Function Head", "custom_employee_function.function_head_name"),
+	# The document's own copy first, the function's second -- the usual
+	# nearest-first order, and here it is also newest-first: a Material Request
+	# that carries a reporting head was stamped with the one in force when it
+	# was raised, while the function's is whoever holds the post today.
+	("Reporting Head", ("custom_reporting_head", "custom_employee_function.reporting_head.full_name")),
+	# The person this card was sent to, named on the card. It reads as
+	# redundant in a direct message -- they know who they are -- and is not,
+	# for two reasons: in Channel mode the card is read by people who are not
+	# the approver, and a card that names the wrong manager is the one visible
+	# sign that routing picked the wrong field. The order mirrors
+	# `resolve_project_manager`, so the row shows the field that addressed it.
+	("Project Manager", ("custom_project_head_name", "custom_project_lead_name")),
 )
 
-# A field whose stored value is a code, and where the readable name lives.
-# 'VP-LTP-MFG-001' identifies the record but says nothing to the person being
-# asked to approve. What they want from that record is the head it names --
-# 'Rushikesh Patil' -- not the function's own name, which is the department
-# and tells the approver nothing they do not already know.
-NAMED_LINKS = {
-	"custom_employee_function": ("Employee Function", "function_head_name"),
+# Off, deliberately, and this is the switch to flip when it can be honest.
+#
+# A sent message cannot be edited without an OAuth token carrying
+# ZohoCliq.Messages.UPDATE, so a Status row would say *Pending* on a card for
+# a request approved hours ago and keep saying it forever. A row that is
+# reliably wrong is worse than no row: the approver stops trusting the card,
+# and the card is the whole product here.
+#
+# Everything behind it is built and tested and stays that way -- the states,
+# the colours, the update job, the message ids now kept on every log row. Set
+# this True once the token is in Cliq Settings and the row comes back live.
+SHOW_STATUS_ROW = False
+
+STATUS_LABEL = "Status"
+
+# What the Status row says, read off the workflow state rather than fixed.
+# A card is built on NOTIFY_STATE, so Pending is what it is first written
+# with; the other three are the only places that state can go, because
+# Approve, Reject and Send Back for Correction are the whole of the workflow
+# out of it. ('Rejected by Project Manger' is the workflow's own spelling and
+# has to stay wrong here to match it.)
+#
+# `*text*` is Cliq's bold: single asterisks, not the pair most markdown wants.
+# It is the same syntax `build_request` wraps the subject in, and it does
+# render inside a table cell -- confirmed against the live bot. Cliq has no
+# colour markup for a cell, so the colour is the emoji; it also survives into
+# the push preview, where the card is not rendered at all.
+STATUS_PENDING = "🟠 *Pending*"
+STATUS_BY_STATE = {
+	"Approved by Project Manager": "🟢 *Approved*",
+	"Rejected by Project Manger": "🔴 *Rejected*",
+	"Draft": "🔵 *Sent back for correction*",
 }
+
+# The states that rewrite a card already on someone's screen. Reaching one of
+# these sends nothing: it edits the message the approval was asked for.
+OUTCOME_STATES = tuple(STATUS_BY_STATE)
+
+# Button key -> the workflow action ERPNext is asked to apply. The spelling is
+# the workflow's own; `apply_workflow` matches on it exactly.
+WORKFLOW_ACTIONS = {"approve": "Approve", "reject": "Reject"}
+
+# Fields holding a login address where the card wants a person. All three are
+# `Data`, so none can be walked through like a Link, and each stores
+# 'neelendra.kumar@microcrispr.com' where the reader wants 'Neelendra Kumar'.
+# The address stands if no User carries a full name -- unlike a document code,
+# an address still names the person.
+PERSON_FIELDS = (
+	"custom_reporting_head",
+	"custom_project_head_name",
+	"custom_project_lead_name",
+)
 
 # Cliq rejects a button label over 20 characters with HTTP 400
 # 'input_maxlength_reached', so this is a hard limit, not a style choice.
 # "Open MAT-MR-2026-03832" is 22 and was the first thing that failed.
 BUTTON_LABEL = "Open in ERPNext"
 BUTTON_LABEL_LIMIT = 20
+
+# States where every button is dropped. A button is a call to action, and once
+# the document is approved there is nothing left to do -- the link stops being
+# an offer and becomes a leftover.
+#
+# Only the approval. A rejection or a send-back keeps the link, because both
+# are states somebody still has to go and look at the document about.
+BUTTONLESS_STATES = ("Approved by Project Manager",)
+
+# Acting on the request without leaving Cliq. The label is what the approver
+# reads, the key is what the handler is told was pressed, the workflow action
+# is what ERPNext is asked to apply, and the type is the outline colour Cliq
+# draws: `+` green, `-` red -- the only two it has.
+#
+# These appear on NOTIFY_STATE alone. A card for a decided document shows no
+# way to decide it again, which is the first of the two guards behind
+# requirement 5; the second is in `api.material_request_action`, because a
+# card already on someone's screen cannot be taken back.
+ACTION_BUTTONS = (
+	("Approve", "approve", "Approve", "+"),
+	("Reject", "reject", "Reject", "-"),
+)
+
+# How the document rides along on the button.
+#
+# It has to ride on `key`, because there is nowhere else. Cliq's send API
+# validates a button action against a fixed shape and rejects everything it
+# does not recognise -- `arguments`, documented as the way to pass custom
+# values, comes back `extra_key_found: 'arguments' is an extra key`, and so
+# does any loose key added beside `name` and `owner`. Tested live, all four
+# shapes; `key` was the one that posted.
+#
+# This matters because one approver holds several of these cards at once. The
+# handler is told which button was pressed and nothing about the conversation
+# around it, so a button that does not name its own document cannot act on it.
+ACTION_KEY_SEPARATOR = "::"
 
 # Longest value a table cell may carry before it is cut; 0 would mean never.
 #
@@ -180,17 +292,32 @@ def on_workflow_state_change(doc, method=None):
 			return
 
 		old_state, new_state = transition
-		if new_state != NOTIFY_STATE:
+
+		if new_state == NOTIFY_STATE:
+			common.enqueue_job(
+				f"{__name__}.send_transition_messages",
+				"cliq-mr",
+				doc.name,
+				old_state,
+				new_state,
+				material_request=doc.name,
+			)
 			return
 
-		common.enqueue_job(
-			f"{__name__}.send_transition_messages",
-			"cliq-mr",
-			doc.name,
-			old_state,
-			new_state,
-			material_request=doc.name,
-		)
+		# The approval, the rejection and the send-back still send nothing.
+		# They rewrite the Status row of the card the approver was already
+		# given, which is why `old_state` has to be the state that card was
+		# sent for: a document reaching Draft from anywhere else has no
+		# message of ours waiting to be corrected.
+		if old_state == NOTIFY_STATE and new_state in OUTCOME_STATES:
+			common.enqueue_job(
+				f"{__name__}.update_status_messages",
+				"cliq-mr-update",
+				doc.name,
+				old_state,
+				new_state,
+				material_request=doc.name,
+			)
 	except Exception:
 		# A notification must never cost the user their save.
 		frappe.log_error(
@@ -223,6 +350,44 @@ def send_transition_messages(material_request, old_state, new_state, actor):
 	except Exception:
 		frappe.log_error(
 			title=f"Cliq MR: notification failed for {material_request}"[:140],
+			message=frappe.get_traceback(),
+		)
+		return {"ok": False, "error": "see Error Log"}
+
+
+def update_status_messages(material_request, old_state, new_state, actor):
+	"""Rewrite the Status row on the card already delivered. Send nothing.
+
+	There is no recipient to resolve and no duplicate guard to consult: this
+	touches rows that already exist and creates none, so its worst case is a
+	message left reading exactly as it read before.
+
+	Rows are matched on any transition *into* NOTIFY_STATE, because the state
+	the document came from before approval was asked for is not knowable here
+	and does not matter -- what matters is that the row is the one that asked.
+	"""
+	try:
+		if not get_settings().enabled:
+			return {"ok": False, "skipped": "Cliq Settings is disabled."}
+
+		doc = frappe.get_doc(DOCTYPE, material_request)
+		context = base_context(doc, new_state)
+
+		return {
+			"ok": True,
+			"transition": common.state_label(old_state, new_state),
+			"updated": client.update_sent_card(
+				DOCTYPE,
+				doc.name,
+				build_card(doc, context),
+				trigger_state_like=f"%{NOTIFY_STATE}",
+				subject=SUBJECTS[APPROVER].format(**context),
+				message=common.render(MESSAGES["approver_pending"], context),
+			),
+		}
+	except Exception:
+		frappe.log_error(
+			title=f"Cliq MR: could not update card for {material_request}"[:140],
 			message=frappe.get_traceback(),
 		)
 		return {"ok": False, "error": "see Error Log"}
@@ -361,6 +526,11 @@ def base_context(doc, new_state) -> dict:
 		"mr": doc.name,
 		"url": common.form_url(DOCTYPE, doc.name),
 		"reason": reason_for(doc, new_state),
+		# Not wording -- the Status row reads it. It is the state the card is
+		# being built *for*, which is what lets one function build both the
+		# message that goes out on NOTIFY_STATE and the corrected card that
+		# replaces it on approval.
+		"state": new_state,
 	}
 
 
@@ -390,6 +560,23 @@ def build_card(doc, context) -> dict:
 	if context.get("reason"):
 		rows.append({field: "Remark", value_header: context["reason"]})
 
+	# Only ever set by `api.material_request_action`, to say why a press did
+	# not do what it looked like it would -- the document had already moved,
+	# or the person pressing was not the one being asked.
+	if context.get("note"):
+		rows.append({field: "Note", value_header: context["note"]})
+
+	# Last, and appended after the Remark on purpose: it is the one row that is
+	# true of the card rather than of the document, so it reads as the table's
+	# closing line rather than as another field of the Material Request.
+	if SHOW_STATUS_ROW:
+		rows.append(
+			{
+				field: STATUS_LABEL,
+				value_header: STATUS_BY_STATE.get(context.get("state"), STATUS_PENDING),
+			}
+		)
+
 	return {
 		# No `title` on the card. Cliq renders it as a line of its own directly
 		# above `text`, and `text` already opens with the document name -- the
@@ -404,17 +591,127 @@ def build_card(doc, context) -> dict:
 				"data": {"headers": list(CARD_HEADERS), "rows": rows},
 			}
 		],
-		"buttons": [
-			{
-				"label": BUTTON_LABEL.format(**context)[:BUTTON_LABEL_LIMIT],
-				"type": "+",
-				"action": {
-					"type": "open.url",
-					"data": {"web": context["url"]},
-				},
-			}
-		],
+		# Always present, and empty rather than absent when the state has no
+		# use for it. A send drops an empty list on its own -- `build_request`
+		# only copies keys that hold something -- but an edit has to say the
+		# word: a PUT that simply omits `buttons` leaves the delivered
+		# message's own button sitting there, which is the opposite of what
+		# dropping it means.
+		"buttons": buttons(context),
 	}
+
+
+def buttons(context) -> list:
+	"""What the approver can do from the message, given where it stands.
+
+	Pending and configured for it: Approve, Reject, and the link. Pending
+	without that configuration: the link alone, which is the behaviour this
+	app had before any of it existed. Decided: whatever the state allows,
+	which for an approval is nothing.
+	"""
+	if context.get("state") in BUTTONLESS_STATES:
+		return []
+
+	out = []
+	if context.get("state") == NOTIFY_STATE:
+		out += action_buttons(context)
+
+	out.append(
+		{
+			"label": BUTTON_LABEL.format(**context)[:BUTTON_LABEL_LIMIT],
+			"type": "+",
+			"action": {
+				"type": "open.url",
+				"data": {"web": context["url"]},
+			},
+		}
+	)
+	return out
+
+
+def action_buttons(context) -> list:
+	"""Approve and Reject, or nothing at all.
+
+	Nothing at all when Cliq Settings does not name the function behind them.
+	A button that invokes a function Cliq cannot resolve fails in the
+	approver's face when they press it, and a card with no button at least
+	still carries the link -- so an unconfigured site degrades to what it had
+	rather than to something broken.
+	"""
+	settings = get_settings()
+	name = (settings.get("function_name") or "").strip()
+	owner = (settings.get("function_owner") or "").strip()
+	if not (name and owner):
+		return []
+
+	return [
+		{
+			"label": label,
+			"type": outline,
+			# 'approve::MAT-MR-2026-03958' -- the press and the document it is
+			# about, in the one field Cliq will carry. See
+			# ACTION_KEY_SEPARATOR for why there is nowhere better.
+			"key": f"{key}{ACTION_KEY_SEPARATOR}{context['mr']}",
+			"action": {
+				"type": "invoke.function",
+				"data": {"name": name, "owner": owner},
+			},
+		}
+		for label, key, _action, outline in ACTION_BUTTONS
+	]
+
+
+def follow_link(doc, path: str) -> str:
+	"""Read a value off a record this document links to, one dot per hop.
+
+	'custom_employee_function.reporting_head.full_name' reads the Link field on
+	the Material Request, then `reporting_head` off that Employee Function, then
+	`full_name` off the User that names. Every hop's target doctype comes from
+	the field's own `options`, so no doctype is spelled out here and a renamed
+	link target needs no change in this file.
+
+	Why the walk exists at all: what is stored is a code or a login.
+	'VP-LTP-QCT-001' and 'ganesh.dubey@microcrispr.com' both identify a record
+	and neither says anything to the person being asked to approve -- they want
+	'Ganesh Shanker Dubey'. Note that the function's own `function_name` is not
+	what is wanted either: it is the department, which the approver already
+	knows.
+
+	**Only the last hop falls back; an earlier one that leads nowhere drops the
+	row.** The difference is what the fallback would be read as. 17 of this
+	site's 115 functions have no `function_head_name`, and for those the walk
+	ends holding 'VP-LTP-QCT-001' -- poor, but it names the function whose head
+	was wanted and the approver can open it. One hop earlier, the same code
+	would appear under *Reporting Head*, where it names nothing at all and
+	reads as that person's id. 106 of those 115 have no `reporting_head`, so
+	that is the common case, not the corner: the row is dropped instead.
+	"""
+	fields = path.split(".")
+	doctype = doc.doctype
+	value = doc.get(fields[0])
+
+	for previous, field in zip(fields, fields[1:]):
+		last_hop = field == fields[-1]
+
+		link = str(value or "").strip()
+		if not link:
+			return ""
+
+		meta_field = frappe.get_meta(doctype).get_field(previous)
+		target = meta_field.options if meta_field and meta_field.fieldtype == "Link" else None
+		if not target:
+			return link if last_hop else ""
+
+		# Not `get_cached_doc`: that raises on a name that no longer exists, and
+		# older documents do hold codes for functions since renamed or deleted.
+		# `get_value` answers None, and the walk ends on the code it was holding.
+		next_value = frappe.db.get_value(target, link, field)
+		if not next_value:
+			return link if last_hop else ""
+
+		doctype, value = target, next_value
+
+	return str(value or "").strip()
 
 
 def card_value(doc, fieldname) -> str:
@@ -424,10 +721,12 @@ def card_value(doc, fieldname) -> str:
 	wins. That is how 'Created By' prefers the readable name over the link
 	over `owner`, without three rows or three special cases.
 
+	It may also be a dotted path, which is read off the records this document
+	links to rather than off the document; see `follow_link`. A `PERSON_FIELDS`
+	field is swapped for the name behind the address.
+
 	Dates arrive as `datetime.date` and would otherwise serialise as
 	`2026-05-21`, which is not the format this site shows anywhere else.
-	A `NAMED_LINKS` field is swapped for its readable name, falling back to the
-	code if the record has no name set -- a code is poor, but blank is worse.
 	"""
 	if isinstance(fieldname, tuple):
 		for candidate in fieldname:
@@ -436,16 +735,19 @@ def card_value(doc, fieldname) -> str:
 				return value
 		return ""
 
-	value = doc.get(fieldname)
+	if "." in fieldname:
+		value = follow_link(doc, fieldname)
+	else:
+		value = doc.get(fieldname)
+
 	if value in (None, ""):
 		return ""
 
 	if fieldname == "transaction_date":
 		return formatdate(value)
 
-	if fieldname in NAMED_LINKS:
-		linked_doctype, name_field = NAMED_LINKS[fieldname]
-		value = frappe.db.get_value(linked_doctype, value, name_field) or value
+	if fieldname in PERSON_FIELDS:
+		value = frappe.db.get_value("User", str(value).strip(), "full_name") or value
 
 	# Collapse runs of whitespace: several of these values are typed by hand
 	# and carry double spaces, which the table renders literally.

@@ -8,6 +8,7 @@ rest, and nothing above it needs to know any of it:
 
     queue_message()  write a log row and hand off to a worker
     deliver()        the worker -- post it, judge the reply, retry or finish
+    update_sent_card()  rewrite a delivered message instead of sending another
     build_request()  the exact URL and JSON body Zoho receives
     log_skipped()    record a message that could not be addressed
 
@@ -407,6 +408,10 @@ def deliver(log_name: str):
 
 	if 200 <= status_code < 300:
 		if mode == CHANNEL or _resolved_anyone(body):
+			# Kept because an edit has to be addressed to a message, and this
+			# reply is the only place Zoho ever offers one. Posting as a bot
+			# it does not, so this is usually empty -- see `update_sent_card`.
+			_remember_message(log, body)
 			_finish(log, "Sent", attempts=attempts, response=body)
 		else:
 			_finish(
@@ -442,6 +447,260 @@ def _resolved_anyone(body: str) -> bool:
 		return True
 
 
+def _remember_message(log, body: str):
+	"""Store what Zoho gave us to address this message by, later.
+
+	The id is not where the documentation suggests. A bot post answers with
+
+	    {"user_ids": ["60062744041"],
+	     "message_details": {"60062744041": {"chat_id": "CT_120...-B2",
+	                                         "message_id": "1795071752472%2055609997592"}},
+	     "users": ["60062744041"]}
+
+	-- one entry per resolved user, keyed by their ZUID, and only when
+	`sync_message` was sent. The flat `message_id` is read first anyway
+	because that is the shape the OAuth endpoints return.
+
+	The id is left percent-encoded exactly as Zoho wrote it. It contains a
+	space, and that space is already escaped for the URL it will be pasted
+	into; decoding it here would mean re-encoding it there.
+	"""
+	try:
+		payload = json.loads(body or "{}")
+	except Exception:
+		return
+
+	if not isinstance(payload, dict):
+		return
+
+	message_id = payload.get("message_id") or payload.get("id")
+	chat_id = payload.get("chat_id") or payload.get("chid")
+
+	# One recipient per message here, so the first entry is the message. A
+	# multi-recipient send would need a row each to stay addressable.
+	for details in (payload.get("message_details") or {}).values():
+		if not isinstance(details, dict):
+			continue
+		message_id = message_id or details.get("message_id")
+		chat_id = chat_id or details.get("chat_id")
+		break
+
+	# Written straight to the row rather than set on the document. `_finish`
+	# runs next and writes only the fields it was given, so anything left in
+	# memory here is dropped -- which is how the first version of this lost
+	# every id it read.
+	values = {}
+	if message_id:
+		values["message_id"] = str(message_id)
+	if chat_id:
+		values["chat_id"] = str(chat_id)
+	if values:
+		log.db_set(values, update_modified=False)
+
+
+def update_sent_card(
+	reference_doctype: str,
+	reference_name: str,
+	card: dict,
+	trigger_state_like: str,
+	subject: str | None = None,
+	message: str | None = None,
+) -> list[str]:
+	"""Rewrite messages already delivered for this document, in place.
+
+	**This never sends anything.** It edits what is already on the reader's
+	screen, or it records why it could not -- and either way no second message
+	appears, which is the whole reason it exists.
+
+	`trigger_state_like` picks which of a document's messages to rewrite, by
+	matching the transition that produced them. A document that has been round
+	the workflow twice has two rows, and only the one now being superseded
+	should change.
+	"""
+	rows = frappe.get_all(
+		"Cliq Message Log",
+		filters={
+			"reference_doctype": reference_doctype,
+			"reference_name": reference_name,
+			"trigger_state": ("like", trigger_state_like),
+			"status": ("in", LIVE_STATUSES),
+		},
+		pluck="name",
+		order_by="creation desc",
+	)
+
+	updated = []
+	for name in rows:
+		log = frappe.get_doc("Cliq Message Log", name)
+		if _update_one(log, card, subject, message):
+			updated.append(name)
+	return updated
+
+
+def _update_one(log, card: dict, subject: str | None, message: str | None) -> bool:
+	"""Edit one delivered message, or write down why it stayed as it was.
+
+	The note goes on the row rather than into the Error Log. A message that
+	cannot be edited is a gap in the configuration, exactly like a recipient
+	that cannot be addressed, and the row is where this app keeps those.
+
+	The stored card is refreshed whichever way it goes: it is what a resend or
+	a dry-run preview would use, and leaving a card behind that says Pending
+	for a document that is approved would be a second, quieter wrong answer.
+	"""
+	log.db_set("card_data", json.dumps(card, indent=2), update_modified=False)
+
+	settings = get_settings()
+	note = _cannot_update(settings, log)
+	if note:
+		log.db_set("update_note", note, update_modified=False)
+		return False
+
+	try:
+		status_code, body = _put_card(settings, log, card, subject, message)
+	except Exception as exc:
+		log.db_set("update_note", f"Update failed: {exc}", update_modified=False)
+		return False
+
+	if 200 <= status_code < 300:
+		log.db_set("update_note", f"Updated in place at {now_datetime()}.", update_modified=False)
+		return True
+
+	log.db_set("update_note", f"Update refused: HTTP {status_code}: {body}", update_modified=False)
+	return False
+
+
+def _cannot_update(settings, log) -> str | None:
+	"""The reason this message cannot be edited, or None if it can.
+
+	Each of these is a wall rather than a failure to try, and each names what
+	would have to change to clear it -- the note lands on the log row a reader
+	is already looking at when they ask why the card still says Pending.
+	"""
+	if not log.message_id:
+		return (
+			"This message was sent before the id was being kept, so there is "
+			"nothing to address an edit to. Messages sent from now on carry "
+			"one. The card was left as sent, and nothing was sent again."
+		)
+
+	if log.delivery_mode == CHANNEL and not log.chat_id:
+		return (
+			"A channel post carries no chat id in Zoho's reply, so there is "
+			"nothing to address an edit to. The message was left as sent."
+		)
+
+	refresh_token = settings.get_password("oauth_refresh_token", raise_exception=False)
+	if not (settings.get("oauth_client_id") and refresh_token):
+		return (
+			"Editing a sent message needs an OAuth token carrying the "
+			"ZohoCliq.Messages.UPDATE scope. A zapikey is refused with HTTP "
+			"401 here -- tested against this bot, not assumed. Fill in the "
+			"In-Place Updates section of Cliq Settings. Nothing was sent."
+		)
+
+	return None
+
+
+def _access_token(settings) -> str:
+	"""A short-lived access token, refreshed when it has run out.
+
+	Cached rather than fetched per call: Zoho rate-limits token refreshes far
+	more tightly than it limits messages, and a burst of approvals would spend
+	the quota on tokens. The cached life is cut two minutes short of Zoho's
+	own, because a token that expires in flight comes back as an
+	authentication failure and reads like a bad refresh token.
+	"""
+	cached = frappe.cache().get_value("cliq_access_token")
+	if cached:
+		return cached
+
+	import requests
+
+	response = requests.post(
+		f"https://{_accounts_domain(settings)}/oauth/v2/token",
+		params={
+			"refresh_token": settings.get_password("oauth_refresh_token", raise_exception=False),
+			"client_id": settings.get("oauth_client_id"),
+			"client_secret": settings.get_password("oauth_client_secret", raise_exception=False),
+			"grant_type": "refresh_token",
+		},
+		timeout=cint(settings.timeout) or 10,
+	)
+	payload = response.json()
+
+	token = payload.get("access_token")
+	if not token:
+		raise Exception(f"no access token in Zoho's reply: {payload}")
+
+	frappe.cache().set_value(
+		"cliq_access_token", token, expires_in_sec=cint(payload.get("expires_in") or 3600) - 120
+	)
+	return token
+
+
+def _accounts_domain(settings) -> str:
+	"""Where tokens are refreshed, following the API domain by default.
+
+	The data centre has to match. A token refreshed at accounts.zoho.com is
+	not valid against cliq.zoho.in, and that failure reads as a bad refresh
+	token rather than as the wrong continent.
+	"""
+	configured = (settings.get("accounts_domain") or "").strip()
+	if configured:
+		return configured
+	return (settings.api_domain or "cliq.zoho.com").replace("cliq.", "accounts.", 1)
+
+
+def _put_card(settings, log, card: dict, subject: str | None, message: str | None):
+	"""The edit itself: v3, because v2 can only rewrite `text`.
+
+	The status this app wants to change lives in a table slide, and the v2
+	edit API accepts `text` and nothing else -- it would rewrite the line
+	above the card while the card under it went on saying Pending. v3 accepts
+	`card`, `slides` and `buttons`, which is the whole reason the edit is on
+	v3 while sending stays on v2.
+
+	Two details are the API's, not choices. `text` is **mandatory** -- a body
+	carrying only slides comes back `param_missing` -- so it is always sent,
+	rebuilt from the same subject the message went out with. And
+	`bot_unique_name` must *not* be in the query: this endpoint answers
+	`extra_param_found` and refuses the whole request.
+
+	Parameters are validated before credentials, which is worth knowing when
+	reading a failure here: a 400 about a parameter says nothing about whether
+	the token would have been accepted.
+	"""
+	import requests
+
+	url = (
+		f"https://{settings.api_domain}/api/v3/chats/"
+		f"{log.chat_id or log.recipient_cliq}/messages/{log.message_id}"
+	)
+
+	# Mandatory, and sent first so a card with nothing else to say still
+	# forms a valid request.
+	payload = {
+		"notify_edit": False,
+		"text": build_request(settings, "", subject or "", message or "")[1]["text"],
+	}
+	for key in ("card", "slides", "buttons"):
+		# `is not None`, not truthiness: an empty `buttons` list is an
+		# instruction to remove the button that is on the message now, and
+		# testing truthiness would silently drop that instruction and leave it
+		# there. A key the card never set is still omitted.
+		if card.get(key) is not None:
+			payload[key] = card[key]
+
+	response = requests.put(
+		url,
+		headers={"Authorization": f"Zoho-oauthtoken {_access_token(settings)}"},
+		json=payload,
+		timeout=cint(settings.timeout) or 10,
+	)
+	return response.status_code, response.text[:4000]
+
+
 def build_request(
 	settings, target: str, subject: str, message: str, mode: str = DIRECT, card: dict | None = None
 ):
@@ -473,7 +732,15 @@ def build_request(
 			f"https://{settings.api_domain}/api/v2/bots/"
 			f"{settings.bot_unique_name}/message"
 		)
-		payload = {"text": text, "userids": target}
+		# `sync_message` is what makes Zoho answer with the id of the message
+		# it just created, under `message_details`. Without it the reply is
+		# only the list of users it resolved, and a message with no id can
+		# never be edited afterwards -- which is the whole of `update_sent_card`.
+		#
+		# Direct messages only. The channel endpoint rejects parameters it does
+		# not know with `extra_param_found`, and a notification that fails to
+		# send is a far worse trade than a channel post that cannot be edited.
+		payload = {"text": text, "userids": target, "sync_message": True}
 
 	for key in ("card", "slides", "buttons"):
 		if card and card.get(key):
@@ -538,6 +805,9 @@ def _finish(log, status, attempts=None, error=None, response=None):
 	"""
 	settings = get_settings()
 
+	# Note that this also forfeits any later edit: `update_sent_card` finds
+	# messages through their log rows, so a site that does not keep the
+	# successful ones has nothing left to address an edit to.
 	if status == "Sent" and not settings.log_successful_sends:
 		frappe.delete_doc(
 			"Cliq Message Log", log.name, ignore_permissions=True, force=True
